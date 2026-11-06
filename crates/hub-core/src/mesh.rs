@@ -290,10 +290,21 @@ pub fn weld(positions: &[Vec3], tolerance: f32) -> Welded {
 }
 
 /// A weld tolerance scaled to the model: one millionth of its bounding-box
-/// diagonal, but never below a micrometre.
+/// diagonal.
+///
+/// It is purely relative, so a model welds the same way in any units: a
+/// generator's ±1 cube, metres in the scene, millimetres in a 3MF. (A fixed
+/// floor made a repaired model, scaled down to print size, weld more coarsely
+/// on its next check and grow zero-area triangles again.) It never drops
+/// below what `f32` resolves at the model's coordinates.
 pub fn default_weld_tolerance(bounds: Option<Aabb>) -> f32 {
-    let diagonal = bounds.map_or(1.0, |b| b.size().length());
-    (diagonal * 1e-6).max(1e-6)
+    let Some(b) = bounds else {
+        return 1e-6;
+    };
+    let reach = b.min.abs().max(b.max.abs()).max_element();
+    (b.size().length() * 1e-6)
+        .max(reach * 4.0 * f32::EPSILON)
+        .max(f32::MIN_POSITIVE)
 }
 
 #[cfg(test)]

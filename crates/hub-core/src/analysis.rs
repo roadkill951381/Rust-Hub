@@ -317,16 +317,26 @@ pub fn repair(mesh: &Mesh) -> (Mesh, RepairSummary) {
 /// each shell, fills holes, and turns inside-out shells outward (leaving the
 /// inner surfaces of cavities facing into the cavity).
 ///
-/// Vertices, UVs and normals are kept (only flipped faces' normals change), so
-/// the result is still good for games.
+/// Vertices that sit closer together than the check's weld tolerance (with a
+/// margin) are moved onto one position, at most two millionths of the model's
+/// size, so the slivers between them stay gone however the model is scaled
+/// or exported afterwards. UVs and normals are kept (only flipped faces'
+/// normals change), so the result is still good for games.
 pub fn repair_with(mesh: &Mesh, options: &RepairOptions) -> (Mesh, RepairSummary) {
     let mut summary = RepairSummary::default();
-    let welded = weld(&mesh.positions, default_weld_tolerance(mesh.bounds()));
+    // Twice the check's tolerance: snapped positions then sit at least that far
+    // apart, so rounding when they are scaled or written out cannot bring two
+    // of them within the check's reach.
+    let tolerance = 2.0 * default_weld_tolerance(mesh.bounds());
+    let welded = weld(&mesh.positions, tolerance);
+    let mut out = mesh.clone();
+    for (p, &w) in out.positions.iter_mut().zip(&welded.remap) {
+        *p = welded.positions[w as usize];
+    }
 
     // 1. Drop degenerate and duplicate triangles, then unify winding.
-    let tris = drop_bad_triangles(mesh, &welded, &mut summary);
+    let tris = drop_bad_triangles(&out, &welded, tolerance, &mut summary);
     let flips = unify_winding(&tris, &welded);
-    let mut out = mesh.clone();
     out.indices.clear();
     for (t, &flip) in tris.iter().zip(&flips) {
         out.indices.extend_from_slice(&oriented(*t, flip));
@@ -401,8 +411,12 @@ pub fn repair_with(mesh: &Mesh, options: &RepairOptions) -> (Mesh, RepairSummary
     (out, summary)
 }
 
-fn drop_bad_triangles(mesh: &Mesh, welded: &Welded, summary: &mut RepairSummary) -> Vec<[u32; 3]> {
-    let tolerance = default_weld_tolerance(mesh.bounds());
+fn drop_bad_triangles(
+    mesh: &Mesh,
+    welded: &Welded,
+    tolerance: f32,
+    summary: &mut RepairSummary,
+) -> Vec<[u32; 3]> {
     let key = |i: u32| welded.remap[i as usize];
     let mut seen = HashSet::new();
     let mut tris = Vec::with_capacity(mesh.triangle_count());
@@ -951,6 +965,83 @@ mod tests {
         assert_eq!(summary.removed_duplicates, 1);
         assert_eq!(summary.removed_degenerate, 1);
         assert_eq!(fixed.triangle_count(), 12);
+    }
+
+    /// A closed 2-unit cube, wound outward, with welded corners.
+    fn welded_cube() -> Mesh {
+        let positions = [
+            [-1., -1., -1.],
+            [1., -1., -1.],
+            [1., 1., -1.],
+            [-1., 1., -1.],
+            [-1., -1., 1.],
+            [1., -1., 1.],
+            [1., 1., 1.],
+            [-1., 1., 1.],
+        ]
+        .map(Vec3::from_array)
+        .to_vec();
+        let indices = vec![
+            0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7,
+            3, 1, 2, 6, 1, 6, 5,
+        ];
+        Mesh {
+            positions,
+            indices,
+            ..Mesh::default()
+        }
+    }
+
+    /// Splits edge `a`–`b` at a new vertex `p`, keeping the mesh closed.
+    fn split_edge(mesh: &mut Mesh, a: u32, b: u32, p: Vec3) {
+        let new = mesh.positions.len() as u32;
+        mesh.positions.push(p);
+        let mut indices = Vec::new();
+        for t in mesh.triangles() {
+            let mut done = false;
+            for r in 0..3 {
+                let [x, y, z] = [t[r], t[(r + 1) % 3], t[(r + 2) % 3]];
+                if (x, y) == (a, b) || (x, y) == (b, a) {
+                    indices.extend_from_slice(&[x, new, z, new, y, z]);
+                    done = true;
+                    break;
+                }
+            }
+            if !done {
+                indices.extend_from_slice(&t);
+            }
+        }
+        mesh.indices = indices;
+    }
+
+    #[test]
+    fn repaired_slivers_stay_gone_after_scaling_and_3mf() {
+        // A generator's sliver: a vertex half a micrometre from a corner once
+        // the 2-unit model is scaled to 150 mm, the way `hub convert --repair
+        // --size-mm 150` does it (repair first, in the file's own units).
+        let mut mesh = welded_cube();
+        split_edge(&mut mesh, 0, 1, Vec3::new(-1.0 + 5e-6, -1.0, -1.0));
+        assert!(check_printable(&object(mesh.clone())).watertight);
+        let (fixed, _) = repair(&mesh);
+        let mut scaled = object(fixed);
+        scaled.transform.scale = Vec3::splat(0.075);
+        let report = check_printable(&scaled);
+        assert_eq!(
+            report.topology.degenerate_triangles, 0,
+            "{:?}",
+            report.issues
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sliver.3mf");
+        crate::io::export(&path, &[&scaled]).unwrap();
+        let back = crate::io::import(&path).unwrap().remove(0);
+        let report = check_printable(&Object {
+            mesh: Arc::new(back.mesh),
+            transform: back.transform,
+            ..object(Mesh::default())
+        });
+        assert!(report.printable, "{:?}", report.issues);
     }
 
     #[test]
