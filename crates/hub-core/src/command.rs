@@ -11,6 +11,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::{PrintReport, RepairSummary};
+use crate::engine::GenerationInfo;
+use crate::library::Asset;
 use crate::primitives::Primitive;
 use crate::scene::{Material, ObjectId};
 
@@ -95,11 +97,106 @@ pub enum Command {
     },
     /// Bake an object's transform into its vertices and reset the transform.
     ApplyTransform { object: ObjectId },
-    /// Remove zero-area and duplicate triangles, unify winding and turn
-    /// inside-out shells outward. Holes are reported, not filled.
+    /// Remove zero-area and duplicate triangles, unify winding, fill holes and
+    /// turn inside-out shells outward.
     Repair {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         objects: Option<Vec<ObjectId>>,
+        /// Close holes with new triangles (default true).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill_holes: Option<bool>,
+        /// Delete separate pieces smaller than this fraction of the largest
+        /// piece's volume, e.g. 0.01 for the specks AI models leave behind.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remove_small_shells: Option<f32>,
+    },
+    /// Hollow solid objects for resin printing, leaving walls `wall_mm` thick.
+    /// Objects must be watertight; run repair first if they are not.
+    Hollow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objects: Option<Vec<ObjectId>>,
+        wall_mm: f32,
+        /// Grid spacing for the cavity; smaller is more exact and slower.
+        /// Defaults to half the wall thickness.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        voxel_mm: Option<f32>,
+    },
+    /// Rebuild objects' surfaces on a voxel grid with Blender: closes holes,
+    /// merges overlapping parts and evens out triangles. Removes UVs.
+    Remesh {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objects: Option<Vec<ObjectId>>,
+        /// Voxel size; detail smaller than this is lost.
+        voxel_mm: f32,
+    },
+    /// Reduce triangle counts with Blender, keeping shape and UVs.
+    /// Give either `ratio` (0 to 1) or `triangles` (target per object).
+    Decimate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objects: Option<Vec<ObjectId>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ratio: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        triangles: Option<u32>,
+    },
+    /// Lay out new UVs with Blender's Smart UV Project, ready for texturing.
+    UvUnwrap {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objects: Option<Vec<ObjectId>>,
+        /// Faces meeting at a sharper angle than this get a seam (default 66).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        angle_deg: Option<f32>,
+        /// Space between UV islands, 0 to 1 of the texture (default 0.02).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        margin: Option<f32>,
+    },
+    /// Generate a 3D model from a text prompt or a reference image on the
+    /// local generation service (the person's own GPU), add it to the scene
+    /// resting on the floor, and save it to the asset library.
+    Generate {
+        /// Describe one object, e.g. "a knight in plate armour, full body".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+        /// A picture of a single object (PNG or JPEG) to build the model from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<PathBuf>,
+        /// Shape model: "hunyuan3d-2", "hunyuan3d-2mini" or "triposg";
+        /// the service's default when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// Also paint a colour texture (slower, needs more GPU memory).
+        #[serde(default)]
+        texture: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed: Option<u64>,
+        /// Target triangle count.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        faces: Option<u32>,
+        /// Name for the object and the library asset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Scale so the longest side is this many mm.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size_mm: Option<f32>,
+    },
+    /// Save objects as a new version of a library asset.
+    SaveAsset {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objects: Option<Vec<ObjectId>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// Add a library asset to the scene, the latest version unless one is given.
+    LoadAsset {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<u32>,
+    },
+    /// List library assets, optionally only those whose name contains `query`.
+    ListAssets {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
     },
     /// Change an object's material.
     SetMaterial {
@@ -112,10 +209,14 @@ pub enum Command {
     Redo,
     /// List every object with its size and triangle count.
     ListObjects,
-    /// Check objects for 3D printing: watertight, outward-facing, sizes in mm.
+    /// Check objects for 3D printing: watertight, outward-facing, wall
+    /// thickness, sizes in mm.
     CheckPrintable {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         objects: Option<Vec<ObjectId>>,
+        /// Thinnest wall to accept, in mm (default 0.8, two 0.4 mm perimeters).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_wall_mm: Option<f32>,
     },
 }
 
@@ -129,6 +230,21 @@ impl Command {
                 | Command::Redo
                 | Command::ListObjects
                 | Command::CheckPrintable { .. }
+                | Command::SaveAsset { .. }
+                | Command::ListAssets { .. }
+        )
+    }
+
+    /// True for commands that call an engine or take long enough that a GUI
+    /// should run them off its main thread with [`Session::begin`](crate::Session::begin).
+    pub fn is_job(&self) -> bool {
+        matches!(
+            self,
+            Command::Hollow { .. }
+                | Command::Remesh { .. }
+                | Command::Decimate { .. }
+                | Command::UvUnwrap { .. }
+                | Command::Generate { .. }
         )
     }
 
@@ -147,6 +263,14 @@ impl Command {
             Command::PlaceOnFloor { .. } => "Place on floor",
             Command::ApplyTransform { .. } => "Apply transform",
             Command::Repair { .. } => "Repair",
+            Command::Hollow { .. } => "Hollow",
+            Command::Remesh { .. } => "Remesh",
+            Command::Decimate { .. } => "Decimate",
+            Command::UvUnwrap { .. } => "UV unwrap",
+            Command::Generate { .. } => "Generate",
+            Command::SaveAsset { .. } => "Save asset",
+            Command::LoadAsset { .. } => "Load asset",
+            Command::ListAssets { .. } => "List assets",
             Command::SetMaterial { .. } => "Set material",
             Command::Undo => "Undo",
             Command::Redo => "Redo",
@@ -187,6 +311,21 @@ pub struct Outcome {
     pub repairs: Vec<RepairSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets: Vec<Asset>,
+    /// The library version this command wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved: Option<SavedAsset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<GenerationInfo>,
+}
+
+/// A version written to the asset library.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SavedAsset {
+    pub name: String,
+    pub version: u32,
+    pub path: PathBuf,
 }
 
 impl Outcome {
@@ -226,6 +365,9 @@ mod tests {
             "scale_to_size",
             "check_printable",
             "repair",
+            "hollow",
+            "generate",
+            "save_asset",
         ] {
             assert!(schema.contains(op), "{op} missing from schema");
         }

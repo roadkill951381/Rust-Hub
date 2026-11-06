@@ -46,6 +46,12 @@ pub enum Error {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    #[error("asset library: {0}")]
+    Library(String),
+
+    #[error("{0}")]
+    Engine(String),
+
     #[error("nothing to undo")]
     NothingToUndo,
 

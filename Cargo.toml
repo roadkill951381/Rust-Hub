@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-default-members = ["crates/hub-core", "crates/hub-render", "crates/hub-mcp", "crates/hub-cli"]
+default-members = ["crates/hub-core", "crates/hub-blender", "crates/hub-render", "crates/hub-mcp", "crates/hub-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ repository = "https://github.com/roadkill951381/Rust-Hub"
 
 [workspace.dependencies]
 hub-core = { path = "crates/hub-core" }
+hub-blender = { path = "crates/hub-blender" }
 hub-render = { path = "crates/hub-render" }
 hub-mcp = { path = "crates/hub-mcp" }
 
