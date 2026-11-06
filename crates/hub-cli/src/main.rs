@@ -146,7 +146,7 @@ enum Cmd {
         /// Who it is, e.g. the prompt the character was made from.
         #[arg(long)]
         prompt: Option<String>,
-        /// How much of the close-up to redraw, 0 to 1 (0.55 by default):
+        /// How much of the close-up to redraw, 0 to 1 (0.65 by default):
         /// more is sharper and more like the portrait.
         #[arg(long)]
         repaint: Option<f32>,

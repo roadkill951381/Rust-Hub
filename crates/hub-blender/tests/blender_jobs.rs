@@ -160,6 +160,14 @@ fn a_generated_model_is_rigged_like_the_reference() {
     let primitives = after["meshes"][0]["primitives"].as_array().unwrap();
     assert_eq!(primitives.len(), 2, "skin and clothes");
     assert!(primitives[0]["attributes"].get("JOINTS_0").is_some());
+    // Smooth-shaded: triangles share their corners instead of each having
+    // its own (a flat-shaded copy of this model has about 1,600).
+    let corners =
+        &after["accessors"][primitives[0]["attributes"]["POSITION"].as_u64().unwrap() as usize];
+    assert!(
+        corners["count"].as_u64().unwrap() < u64::from(u32::try_from(report.triangles).unwrap()),
+        "{corners}"
+    );
 
     // The reference as a pose guide: a PNG turnaround at the sheet's size.
     let sheet = dir.path().join("pose.png");

@@ -243,7 +243,7 @@ pub enum Command {
         prompt: Option<String>,
         /// How much of the render to redraw, from 0 to 1: more is sharper
         /// and more like the portrait, less keeps the eyes and mouth exactly
-        /// where the model has them. 0.55 by default.
+        /// where the model has them. 0.65 by default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repaint: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

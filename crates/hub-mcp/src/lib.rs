@@ -316,7 +316,7 @@ pub struct SharpenFaceArgs {
     /// Who it is, e.g. the prompt the character was made from.
     #[serde(default)]
     pub prompt: Option<String>,
-    /// How much of the close-up to redraw, 0 to 1 (0.55 by default): more is
+    /// How much of the close-up to redraw, 0 to 1 (0.65 by default): more is
     /// sharper and more like the portrait, less keeps the eyes and mouth
     /// exactly where the model has them.
     #[serde(default)]

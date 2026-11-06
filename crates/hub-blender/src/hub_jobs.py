@@ -147,6 +147,10 @@ def uv_unwrap(obj, params):
 #    the reference names its materials (e.g. ``surv_mei.body``).
 
 
+#: Edges sharper than this stay hard when a rigged model is smooth-shaded.
+SMOOTH_ANGLE = math.radians(75)
+
+
 def rig(job):
     import numpy as np
     from mathutils import Matrix
@@ -179,6 +183,10 @@ def rig(job):
     target = params.get("triangles")
     if target and triangles(model) > int(target):
         decimate(model, {"ratio": int(target) / triangles(model)})
+    # Generated meshes often come without normals and import flat-shaded,
+    # which shows every triangle on a face; keep only real creases sharp.
+    model.data.shade_smooth()
+    model.data.set_sharp_from_angle(angle=SMOOTH_ANGLE)
 
     poses = fit_arms(arm, model)
     report["arm_offsets_deg"] = {side: round(math.degrees(a), 1) for side, (_, a) in poses.items()}

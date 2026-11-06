@@ -159,11 +159,12 @@ hub generate "Mei, a young woman survivor, red jacket, cargo trousers, boots" \
    angles), copies the skin weights, and writes a GLB that keeps the
    reference's skeleton, inverse bind matrices and animations byte for byte.
    Skin is split from clothes by colour into `<materials>.body` and
-   `<materials>.clothes`.
+   `<materials>.clothes`. The model is smooth-shaded, keeping edges sharper
+   than 75° hard.
 4. The shape model paints the whole body from a few small views, so the face
    comes out soft. Blender renders the rigged head close up and unlit, FLUX
    with PuLID redraws that render sharply with the portrait's face
-   (repainting 0.55 of it, so the eyes and mouth stay put), and Blender
+   (repainting 0.65 of it, so the eyes and mouth stay put), and Blender
    paints the result back onto the texture through the same camera, fading
    it out toward the sides of the head and the neck. The result is
    `<name>-rigged-face.glb`; if this step fails, the rigged model is kept and

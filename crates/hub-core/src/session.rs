@@ -890,8 +890,9 @@ const KEEP_LOOK_REPAINT: f32 = 0.7;
 
 /// How much of a face close-up ComfyUI redraws unless told otherwise: enough
 /// to sharpen it and bring in the portrait's likeness, little enough that the
-/// eyes and mouth stay where the model has them.
-const FACE_REPAINT: f32 = 0.55;
+/// eyes and mouth stay where the model has them. Of 0.45, 0.55 and 0.65 on
+/// Mei, 0.65 was the first with a defined nose and lips and nothing doubled.
+const FACE_REPAINT: f32 = 0.65;
 
 /// Renders a rigged model's face close up, has it redrawn with the
 /// portrait's likeness and paints that onto the texture, writing `output`.
