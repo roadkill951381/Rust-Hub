@@ -34,6 +34,8 @@ def _settings(args: argparse.Namespace) -> Settings:
         s.output_dir = Path(args.output)
     if getattr(args, "no_low_vram", False):
         s.low_vram = False
+    if getattr(args, "idle_unload", None) is not None:
+        s.idle_unload = args.idle_unload
     return s
 
 
@@ -166,6 +168,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--port", type=int, help="port (default 8765)")
     p.add_argument("--token", help="require this bearer token")
     p.add_argument("--output", help="folder for job files")
+    p.add_argument(
+        "--idle-unload",
+        type=float,
+        metavar="SECONDS",
+        help="unload models after this long without a job (default 300; 0 = never)",
+    )
     p.add_argument(
         "--insecure", action="store_true", help="allow a network address without a token"
     )

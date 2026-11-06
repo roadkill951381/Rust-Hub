@@ -57,10 +57,14 @@ class Job:
 
 
 class JobQueue:
-    def __init__(self, pipeline: Pipeline, output_dir: Path, keep: int = 50) -> None:
+    def __init__(
+        self, pipeline: Pipeline, output_dir: Path, keep: int = 50, idle_unload: float = 0
+    ) -> None:
         self.pipeline = pipeline
         self.output_dir = output_dir
         self.keep = keep
+        #: Seconds without a job after which models leave the GPU; 0 = never.
+        self.idle_unload = idle_unload
         self._jobs: OrderedDict[str, Job] = OrderedDict()
         self._lock = threading.Lock()
         self._queue: queue.Queue[Job | None] = queue.Queue()
@@ -115,8 +119,24 @@ class JobQueue:
         path = job.dir / name
         return path if path.is_file() else None
 
+    def _next(self) -> Job | None:
+        """The next job; unloads the models first if none comes for a while.
+        Runs on the worker, so it can never race a running job."""
+        if not self.idle_unload:
+            return self._queue.get()
+        try:
+            return self._queue.get(timeout=self.idle_unload)
+        except queue.Empty:
+            if unloaded := self.pipeline.models.unload_all():
+                log.info(
+                    "idle for %.0f s: unloaded %s to free the GPU",
+                    self.idle_unload,
+                    ", ".join(unloaded),
+                )
+            return self._queue.get()
+
     def _run(self) -> None:
-        while (job := self._queue.get()) is not None:
+        while (job := self._next()) is not None:
             if job.cancel.is_set():
                 continue
             job.status = Status.running

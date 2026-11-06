@@ -181,3 +181,16 @@ def test_only_missing_weights_are_announced_as_downloads(tmp_path, monkeypatch):
     (repo / "refs" / "main").write_text("abc")
     assert not v.needs_download("hunyuan3d-2")
     assert v.needs_download("hunyuan3d-paint")
+
+
+def test_idle_models_are_unloaded(settings):
+    settings.idle_unload = 0.3
+    with TestClient(create_app(settings), headers={"Authorization": "Bearer secret"}) as c:
+        job = c.post("/v1/jobs", json={"prompt": "a cup", "seed": 1}).json()
+        assert wait(c, job["id"])["status"] == "done"
+        loaded = lambda: {m["name"] for m in c.get("/health").json()["models"] if m["loaded"]}  # noqa: E731
+        assert "demo" in loaded()
+        time.sleep(1.0)
+        assert loaded() == set()
+        job = c.post("/v1/jobs", json={"prompt": "a cup", "seed": 2}).json()
+        assert wait(c, job["id"])["status"] == "done", "loads again on demand"

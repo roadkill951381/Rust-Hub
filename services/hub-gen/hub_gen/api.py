@@ -20,7 +20,12 @@ from hub_gen.schema import GenerateRequest, Health, JobView, ModelInfo
 
 def create_app(settings: Settings) -> FastAPI:
     models = Models(settings)
-    jobs = JobQueue(Pipeline(settings, models), settings.output_dir, settings.keep_jobs)
+    jobs = JobQueue(
+        Pipeline(settings, models),
+        settings.output_dir,
+        settings.keep_jobs,
+        idle_unload=settings.idle_unload,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:

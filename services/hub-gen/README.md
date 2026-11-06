@@ -105,6 +105,7 @@ Every setting has an environment variable and a flag (`hub-gen serve --help`).
 | `HUB_GEN_TEXTURE_MODEL` | `hunyuan3d-paint` | Texture model |
 | `HUB_GEN_DEVICE` | `cuda` | PyTorch device |
 | `HUB_GEN_LOW_VRAM` | `1` | Park idle models in system memory |
+| `HUB_GEN_IDLE_UNLOAD` | `300` | Seconds without a job before every model is unloaded, freeing the GPU and memory (`0` keeps them) |
 | `HUB_GEN_OUTPUT` | `%LOCALAPPDATA%\hub-gen\jobs` | Job folders |
 | `HUB_GEN_KEEP_JOBS` | `50` | Finished jobs kept on disk |
 | `HUB_GEN_TRIPOSG_DIR` | none | TripoSG checkout |

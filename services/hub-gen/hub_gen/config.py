@@ -31,6 +31,9 @@ class Settings:
     #: Keep only the model in use on the GPU, parking the others in system
     #: memory. Needed on 16 GB cards when texturing; costs a few seconds.
     low_vram: bool = True
+    #: Seconds without a job after which every model is unloaded, so the GPU
+    #: is free for ComfyUI, games and so on; 0 keeps them loaded.
+    idle_unload: float = 300.0
     #: Finished jobs kept on disk; older ones are deleted.
     keep_jobs: int = 50
     #: Checkout of https://github.com/VAST-AI-Research/TripoSG, for ``triposg``.
@@ -51,6 +54,7 @@ class Settings:
         s.device = env("HUB_GEN_DEVICE", s.device)
         s.low_vram = env("HUB_GEN_LOW_VRAM", "1").lower() not in ("0", "false", "no")
         s.keep_jobs = int(env("HUB_GEN_KEEP_JOBS", str(s.keep_jobs)))
+        s.idle_unload = float(env("HUB_GEN_IDLE_UNLOAD", str(s.idle_unload)))
         if d := env("HUB_GEN_TRIPOSG_DIR"):
             s.triposg_dir = Path(d)
         return s

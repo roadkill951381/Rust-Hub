@@ -213,6 +213,22 @@ class Models:
                 self._loaded[name] = model
             return model
 
+    def unload_all(self) -> list[str]:
+        """Drops every model, giving back GPU and system memory. The next job
+        loads what it needs again from the disk cache."""
+        with self._lock:
+            names = list(self._loaded)
+            self._loaded.clear()
+        if names:
+            import gc
+            import sys
+
+            gc.collect()
+            torch = sys.modules.get("torch")
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        return names
+
     def loaded(self) -> list[str]:
         return list(self._loaded)
 
