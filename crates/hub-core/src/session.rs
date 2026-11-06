@@ -1,13 +1,14 @@
 //! A session owns the scene and its undo history and executes commands.
 
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use glam::{Mat4, Quat, Vec3};
 
 use crate::analysis::{self, CheckOptions, RepairOptions};
 use crate::command::{Command, ObjectInfo, Outcome, SavedAsset, SizeAxis};
-use crate::engine::{Engines, GenerateRequest, Generated, MeshOp, Progress};
+use crate::engine::{Engines, GenerateRequest, Generated, MeshOp, Progress, RigReport, RigRequest};
 use crate::error::{Error, Result};
 use crate::hollow;
 use crate::io;
@@ -395,6 +396,10 @@ impl Session {
                 faces,
                 name,
                 size_mm,
+                face,
+                multiview,
+                rig_like,
+                materials,
             } => {
                 generator(&self.engines)?;
                 let prompt = prompt.filter(|p| !p.trim().is_empty());
@@ -403,16 +408,21 @@ impl Session {
                         "give a prompt describing the object, or an image of it".into(),
                     ));
                 }
-                if let Some(path) = &image
-                    && !path.is_file()
-                {
-                    return Err(Error::Read {
-                        path: path.clone(),
-                        source: std::io::Error::from(std::io::ErrorKind::NotFound),
-                    });
+                if face.is_some() && (image.is_some() || prompt.is_none()) {
+                    return Err(Error::InvalidArgument(
+                        "a face is kept while a picture is drawn from the prompt: give a \
+                         prompt and no image"
+                            .into(),
+                    ));
+                }
+                for path in [&image, &face, &rig_like].into_iter().flatten() {
+                    must_exist(path)?;
                 }
                 if let Some(s) = size_mm {
                     positive(s, "size_mm")?;
+                }
+                if rig_like.is_some() {
+                    rigger(&self.engines)?;
                 }
                 Work::Generate {
                     request: GenerateRequest {
@@ -420,13 +430,35 @@ impl Session {
                         image,
                         model,
                         image_model,
-                        texture,
+                        // A rigged character needs its colours to split skin from clothes.
+                        texture: texture || rig_like.is_some(),
                         seed,
                         faces,
+                        face,
+                        multiview,
                     },
                     name,
                     size_mm,
+                    rig: rig_like.map(|reference| (reference, materials)),
                 }
+            }
+            Command::Rig {
+                model,
+                reference,
+                output,
+                triangles,
+                materials,
+            } => {
+                rigger(&self.engines)?;
+                must_exist(&model)?;
+                must_exist(&reference)?;
+                Work::Rig(RigRequest {
+                    model,
+                    reference,
+                    output,
+                    triangles,
+                    materials,
+                })
             }
             other => unreachable!("{} is not a job", other.label()),
         };
@@ -479,7 +511,10 @@ enum Work {
         request: GenerateRequest,
         name: Option<String>,
         size_mm: Option<f32>,
+        /// Rig the result like this character, with these material names.
+        rig: Option<(PathBuf, Option<String>)>,
     },
+    Rig(RigRequest),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -510,6 +545,10 @@ enum WorkResult {
         generated: Generated,
         name: Option<String>,
         size_mm: Option<f32>,
+    },
+    Rigged {
+        request: RigRequest,
+        report: RigReport,
     },
 }
 
@@ -572,15 +611,44 @@ impl Job {
                 request,
                 name,
                 size_mm,
+                rig,
             } => {
-                let generated = generator(&self.engines)?
-                    .generate(&request, progress)
+                let share = if rig.is_some() { 0.9 } else { 1.0 };
+                let mut generated = generator(&self.engines)?
+                    .generate(&request, &|f, s| progress(f * share, s))
                     .map_err(Error::Engine)?;
+                if let Some((reference, materials)) = rig {
+                    progress(share, "rigging like the reference character");
+                    let stem = generated
+                        .path
+                        .file_stem()
+                        .map_or_else(|| "model".into(), |s| s.to_string_lossy().into_owned());
+                    let request = RigRequest {
+                        model: generated.path.clone(),
+                        reference,
+                        output: generated.path.with_file_name(format!("{stem}-rigged.glb")),
+                        triangles: request.faces,
+                        materials,
+                    };
+                    let report = rigger(&self.engines)?
+                        .rig(&request)
+                        .map_err(Error::Engine)?;
+                    generated.path = request.output;
+                    generated.info.rig = Some(report);
+                }
                 WorkResult::Generated {
                     generated,
                     name,
                     size_mm,
                 }
+            }
+            Work::Rig(request) => {
+                progress(0.0, "rigging like the reference character");
+                let report = rigger(&self.engines)?
+                    .rig(&request)
+                    .map_err(Error::Engine)?;
+                progress(1.0, "done");
+                WorkResult::Rigged { request, report }
             }
         };
         Ok(JobOutput {
@@ -630,8 +698,77 @@ impl JobOutput {
                 name,
                 size_mm,
             } => finish_generation(scene, engines, generated, name.as_deref(), *size_mm),
+            WorkResult::Rigged { request, report } => finish_rig(scene, engines, request, report),
         }
     }
+}
+
+fn finish_rig(
+    scene: &mut Scene,
+    engines: &Engines,
+    request: &RigRequest,
+    report: &RigReport,
+) -> Result<Outcome> {
+    let new = io::import(&request.output)?;
+    let created: Vec<ObjectId> = new.into_iter().map(|o| scene.add(o)).collect();
+    apply(
+        scene,
+        Command::PlaceOnFloor {
+            objects: Some(created.clone()),
+        },
+        engines,
+    )?;
+    Ok(Outcome {
+        summary: format!(
+            "Rigged {} like {}: {}; wrote {}",
+            file_name(&request.model),
+            file_name(&request.reference),
+            describe_rig(report),
+            request.output.display()
+        ),
+        objects: infos(scene, &created)?,
+        created,
+        path: Some(request.output.clone()),
+        ..Outcome::default()
+    })
+}
+
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// e.g. "38,748 triangles on 52 bones, materials `surv_mei.body` (31% skin) and
+/// `surv_mei.clothes`, arms moved 4° and 5°".
+fn describe_rig(report: &RigReport) -> String {
+    let mut text = format!(
+        "{} triangles on {} bones, materials {} ({:.0}% skin)",
+        report.triangles,
+        report.bones,
+        report.materials.join(" and "),
+        report.skin_fraction * 100.0
+    );
+    if !report.arm_offsets_deg.is_empty() {
+        let arms: Vec<String> = report
+            .arm_offsets_deg
+            .iter()
+            .map(|(side, deg)| format!("{side} {:.0}°", deg.abs()))
+            .collect();
+        let _ = write!(
+            text,
+            ", arms moved into the rest pose ({})",
+            arms.join(", ")
+        );
+    }
+    if report.turned {
+        text.push_str(", turned round to face forward");
+    }
+    if let Some(note) = &report.note {
+        let _ = write!(text, " ({note})");
+    }
+    text
 }
 
 fn hollowed(
@@ -709,7 +846,7 @@ fn finish_generation(
         Some(library) => {
             let new = NewVersion {
                 note: None,
-                source: AssetSource::Generated(info.clone()),
+                source: AssetSource::Generated(Box::new(info.clone())),
                 triangles: raw_triangles,
                 size_mm: raw_size,
             };
@@ -733,6 +870,9 @@ fn finish_generation(
         "Generated {name} with {} in {:.0} s (seed {}), {raw_triangles} triangles",
         info.model, info.seconds, info.seed
     );
+    if let Some(rig) = &info.rig {
+        let _ = write!(summary, "; rigged: {}", describe_rig(rig));
+    }
     if let Some(s) = &saved {
         let _ = write!(summary, "; saved as {} version {}", s.name, s.version);
     }
@@ -821,6 +961,27 @@ fn mesh_tools(engines: &Engines) -> Result<&dyn crate::engine::MeshTools> {
                 .into(),
         )
     })
+}
+
+fn rigger(engines: &Engines) -> Result<&dyn crate::engine::Rigger> {
+    engines.rigger.as_deref().ok_or_else(|| {
+        Error::Engine(
+            "Blender is needed to rig characters and was not found. Install Blender (4.2 or \
+             newer) from blender.org, or set HUB_BLENDER to the blender executable"
+                .into(),
+        )
+    })
+}
+
+fn must_exist(path: &std::path::Path) -> Result<()> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(Error::Read {
+            path: path.to_owned(),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        })
+    }
 }
 
 fn generator(engines: &Engines) -> Result<&dyn crate::engine::Generator> {
@@ -1076,7 +1237,8 @@ fn apply(scene: &mut Scene, command: Command, engines: &Engines) -> Result<Outco
         | Command::Remesh { .. }
         | Command::Decimate { .. }
         | Command::UvUnwrap { .. }
-        | Command::Generate { .. } => unreachable!("handled by Session::run"),
+        | Command::Generate { .. }
+        | Command::Rig { .. } => unreachable!("handled by Session::run"),
     }
 }
 
@@ -1390,6 +1552,10 @@ mod tests {
                 faces: None,
                 name: None,
                 size_mm: None,
+                face: None,
+                multiview: false,
+                rig_like: None,
+                materials: None,
             })
             .unwrap_err()
             .to_string();
@@ -1452,9 +1618,11 @@ mod tests {
                     image_model: None,
                     prompt: request.prompt.clone(),
                     seed: request.seed.unwrap_or(7),
-                    textured: false,
+                    textured: request.texture,
                     seconds: 1.0,
                     image: None,
+                    face: request.face.clone(),
+                    ..crate::engine::GenerationInfo::default()
                 },
             })
         }
@@ -1476,6 +1644,7 @@ mod tests {
         let engines = Engines {
             mesh_tools: Some(Arc::new(FakeTools)),
             generator: Some(Arc::new(FakeGenerator(dir.path().to_owned()))),
+            rigger: None,
             library: Some(Library::open(dir.path().join("library"))),
         };
         let mut s = Session::with_engines(engines);
@@ -1490,6 +1659,10 @@ mod tests {
                 faces: None,
                 name: None,
                 size_mm: Some(40.0),
+                face: None,
+                multiview: false,
+                rig_like: None,
+                materials: None,
             })
             .unwrap();
         let id = out.created[0];
@@ -1533,5 +1706,90 @@ mod tests {
             })
             .unwrap();
         assert_eq!(loaded.objects[0].triangles, 224);
+    }
+
+    /// "Rigs" by copying the model to the output.
+    #[derive(Debug)]
+    struct FakeRigger;
+
+    impl crate::engine::Rigger for FakeRigger {
+        fn describe(&self) -> String {
+            "fake".into()
+        }
+
+        fn rig(
+            &self,
+            request: &crate::engine::RigRequest,
+        ) -> std::result::Result<crate::engine::RigReport, String> {
+            std::fs::copy(&request.model, &request.output).map_err(|e| e.to_string())?;
+            Ok(crate::engine::RigReport {
+                triangles: 224,
+                bones: 52,
+                materials: vec![format!(
+                    "{}.body",
+                    request.materials.as_deref().unwrap_or("ref")
+                )],
+                turned: true,
+                ..crate::engine::RigReport::default()
+            })
+        }
+    }
+
+    fn character(face: Option<std::path::PathBuf>, image: Option<std::path::PathBuf>) -> Command {
+        Command::Generate {
+            prompt: Some("Mei, a survivor in a red jacket".into()),
+            image,
+            model: None,
+            image_model: None,
+            texture: false,
+            seed: Some(3),
+            faces: Some(20_000),
+            name: Some("Mei".into()),
+            size_mm: None,
+            face,
+            multiview: true,
+            rig_like: None,
+            materials: Some("surv_mei".into()),
+        }
+    }
+
+    #[test]
+    fn generate_can_rig_its_result_like_a_character() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir.path().join("reference.glb");
+        std::fs::write(&reference, b"glTF").unwrap();
+        let face = dir.path().join("portrait.png");
+        std::fs::write(&face, b"png").unwrap();
+        let mut s = Session::with_engines(Engines {
+            generator: Some(Arc::new(FakeGenerator(dir.path().to_owned()))),
+            ..Engines::default()
+        });
+        let mut command = character(Some(face.clone()), None);
+        if let Command::Generate { rig_like, .. } = &mut command {
+            *rig_like = Some(reference.clone());
+        }
+        let err = s.execute(command.clone()).unwrap_err().to_string();
+        assert!(err.to_lowercase().contains("blender"), "{err}");
+
+        s = Session::with_engines(Engines {
+            generator: Some(Arc::new(FakeGenerator(dir.path().to_owned()))),
+            rigger: Some(Arc::new(FakeRigger)),
+            ..Engines::default()
+        });
+        let out = s.execute(command).unwrap();
+        assert!(out.summary.contains("rigged"), "{}", out.summary);
+        let info = out.generation.unwrap();
+        assert_eq!(info.face.as_deref(), Some(face.as_path()));
+        assert!(info.textured, "rigged characters are always textured");
+        let rig = info.rig.unwrap();
+        assert_eq!(rig.materials, ["surv_mei.body"]);
+        assert!(dir.path().join("out-rigged.glb").exists());
+        assert_eq!(s.scene().objects().len(), 1);
+
+        let err = s
+            .execute(character(Some(face), Some(dir.path().join("out.glb"))))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("a face is kept"), "{err}");
     }
 }

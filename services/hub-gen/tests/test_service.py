@@ -194,3 +194,67 @@ def test_idle_models_are_unloaded(settings):
         assert loaded() == set()
         job = c.post("/v1/jobs", json={"prompt": "a cup", "seed": 2}).json()
         assert wait(c, job["id"])["status"] == "done", "loads again on demand"
+
+
+def test_a_turnaround_sheet_builds_from_its_views(client):
+    job = client.post(
+        "/v1/jobs",
+        json={
+            "prompt": "a vase",
+            "seed": 3,
+            "multiview": True,
+            "model": "demo-mv",
+            "texture": True,
+        },
+    ).json()
+    job = wait(client, job["id"])
+    assert job["status"] == "done", job
+    result = job["result"]
+    assert result["views"] == ["front", "left", "back"]
+    assert {"view-front.png", "view-left.png", "view-back.png"} <= set(result["files"])
+    mesh = load_glb(client.get(result["files"]["mesh.glb"]).content)
+    assert mesh.is_watertight
+
+
+def test_multiview_needs_a_multiview_model(client):
+    r = client.post("/v1/jobs", json={"prompt": "a vase", "multiview": True, "model": "demo"})
+    assert r.status_code == 400
+    assert "demo-mv" in r.json()["detail"]
+
+
+def test_a_sheet_splits_into_figures_left_to_right():
+    from hub_gen.imaging import split_sheet
+
+    sheet = Image.new("RGBA", (600, 200), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(sheet)
+    for i, colour in enumerate([(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255)]):
+        draw.rectangle((40 + 200 * i, 20, 140 + 200 * i, 180), fill=colour)
+    draw.rectangle((590, 100, 592, 102), fill=(9, 9, 9, 255))  # a speck
+    figures = split_sheet(sheet)
+    assert [f.getpixel((f.width // 2, 100))[:3] for f in figures] == [
+        (255, 0, 0),
+        (0, 255, 0),
+        (0, 0, 255),
+    ]
+
+
+def test_only_needed_weight_files_are_downloaded():
+    from hub_gen.hfdownload import needed_files
+
+    files = [
+        "hunyuan3d-paint-v2-0-turbo/unet/diffusion_pytorch_model.safetensors",
+        "hunyuan3d-paint-v2-0-turbo/unet/diffusion_pytorch_model.bin",
+        "hunyuan3d-paint-v2-0-turbo/text_encoder/pytorch_model.bin",
+        "hunyuan3d-dit-v2-mv-turbo/model.fp16.safetensors",
+        "hunyuan3d-dit-v2-mv-turbo/model.fp16.ckpt",
+        "hunyuan3d-dit-v2-mv-turbo/config.yaml",
+        "README.md",
+    ]
+    assert needed_files(files, ["hunyuan3d-paint-v2-0-turbo/*"]) == [
+        "hunyuan3d-paint-v2-0-turbo/unet/diffusion_pytorch_model.safetensors",
+        "hunyuan3d-paint-v2-0-turbo/text_encoder/pytorch_model.bin",
+    ]
+    assert needed_files(files, ["hunyuan3d-dit-v2-mv-turbo/*"]) == [
+        "hunyuan3d-dit-v2-mv-turbo/model.fp16.safetensors",
+        "hunyuan3d-dit-v2-mv-turbo/config.yaml",
+    ]

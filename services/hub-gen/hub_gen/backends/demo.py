@@ -22,7 +22,17 @@ class DemoImage:
     def __init__(self, settings: Settings) -> None:
         del settings
 
-    def generate(self, prompt: str, *, seed: int, report: Report) -> Image.Image:
+    def generate(
+        self, prompt: str, *, seed: int, report: Report, sheet: bool = False
+    ) -> Image.Image:
+        if sheet:
+            # Three views side by side, as a turnaround sheet shows them.
+            views = [self.generate(prompt, seed=seed, report=lambda *_: None) for _ in range(3)]
+            image = Image.new("RGB", (512 * 3, 512), (255, 255, 255))
+            for i, view in enumerate(views):
+                image.paste(view, (512 * i, 0))
+            report(1.0, "drew a demo turnaround sheet")
+            return image
         digest = hashlib.sha256(f"{prompt}|{seed}".encode()).digest()
         rng = np.random.default_rng(int.from_bytes(digest[:8], "little"))
         size = 512
@@ -47,9 +57,16 @@ class DemoShape:
         del settings
 
     def generate(
-        self, image: Image.Image, *, seed: int, steps: int | None, report: Report
+        self,
+        image: Image.Image | dict[str, Image.Image],
+        *,
+        seed: int,
+        steps: int | None,
+        report: Report,
     ) -> trimesh.Trimesh:
         del seed, steps
+        if isinstance(image, dict):
+            image = image["front"]
         alpha = np.asarray(image.convert("RGBA").getchannel("A")) > 127
         rows = np.flatnonzero(alpha.any(axis=1))
         if rows.size < 2:
@@ -80,8 +97,10 @@ class DemoTexture:
         del settings
 
     def paint(
-        self, mesh: trimesh.Trimesh, image: Image.Image, *, report: Report
+        self, mesh: trimesh.Trimesh, image: Image.Image | list[Image.Image], *, report: Report
     ) -> trimesh.Trimesh:
+        if isinstance(image, list):
+            image = image[0]
         v = mesh.vertices
         lo, hi = v.min(axis=0), v.max(axis=0)
         u = (np.arctan2(v[:, 2], v[:, 0]) / (2 * np.pi)) % 1.0

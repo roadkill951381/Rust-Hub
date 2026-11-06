@@ -59,6 +59,7 @@ def create_app(settings: Settings) -> FastAPI:
             device=_describe_device(settings.device),
             default_model=settings.default_model,
             image_model=settings.image_model,
+            multiview_model=settings.multiview_model,
             texture_model=settings.texture_model,
             queued=jobs.waiting(),
             models=[ModelInfo(**m) for m in models.status()],

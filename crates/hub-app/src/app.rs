@@ -96,6 +96,14 @@ struct GenerateForm {
     fixed_seed: bool,
     seed: u64,
     size_mm: f32,
+    /// A portrait whose face the character keeps.
+    face: Option<PathBuf>,
+    /// Build the shape from front, side and back views.
+    multiview: bool,
+    /// A rigged character (.glb) to rig the result like.
+    rig_like: Option<PathBuf>,
+    /// Material name prefix when rigging; the reference's when empty.
+    materials: String,
 }
 
 impl Default for GenerateForm {
@@ -109,6 +117,10 @@ impl Default for GenerateForm {
             fixed_seed: false,
             seed: 1234,
             size_mm: 80.0,
+            face: None,
+            multiview: false,
+            rig_like: None,
+            materials: String::new(),
         }
     }
 }
@@ -493,6 +505,45 @@ impl HubApp {
             .on_hover_text(
                 "Slower and needs more GPU memory. The texture is kept in the library copy.",
             );
+        egui::CollapsingHeader::new("Character")
+            .default_open(form.face.is_some() || form.rig_like.is_some())
+            .show(ui, |ui| {
+                file_row(
+                    ui,
+                    "Face",
+                    &mut form.face,
+                    ("Images", &IMAGE_EXTENSIONS),
+                    "A portrait whose face the character keeps (drawn with PuLID in ComfyUI)",
+                );
+                ui.checkbox(&mut form.multiview, "Front, side and back views")
+                    .on_hover_text(
+                        "Draw the character from three sides and build the shape from all \
+                         of them: truer backs, hair and profiles",
+                    );
+                file_row(
+                    ui,
+                    "Rig like",
+                    &mut form.rig_like,
+                    ("glTF binary", &["glb"]),
+                    "A rigged character (.glb): the result gets its skeleton and \
+                     animations, so a game can load it in place of the old one",
+                );
+                if form.rig_like.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.label("Materials");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut form.materials)
+                                .hint_text("as the reference")
+                                .desired_width(120.0),
+                        )
+                        .on_hover_text(
+                            "Start of the material names: surv_mei gives surv_mei.body \
+                             and surv_mei.clothes",
+                        );
+                    });
+                    ui.weak("Describe the reference's rest pose in the prompt, e.g. an A-pose.");
+                }
+            });
         let ready = !form.prompt.trim().is_empty() || form.image.is_some();
         let idle = self.running.is_none();
         let clicked = ui
@@ -522,7 +573,12 @@ impl HubApp {
                 seed: form.fixed_seed.then_some(form.seed),
                 faces: None,
                 name: None,
-                size_mm: Some(form.size_mm),
+                // A rigged character keeps its reference's size.
+                size_mm: form.rig_like.is_none().then_some(form.size_mm),
+                face: form.face.clone(),
+                multiview: form.multiview,
+                rig_like: form.rig_like.clone(),
+                materials: Some(form.materials.trim().to_owned()).filter(|m| !m.is_empty()),
             };
             self.execute(command);
         }
@@ -1188,4 +1244,31 @@ impl eframe::App for HubApp {
             self.updates.show(ui.ctx());
         }
     }
+}
+
+/// A labelled file choice with Choose… and Clear buttons.
+fn file_row(
+    ui: &mut Ui,
+    label: &str,
+    path: &mut Option<PathBuf>,
+    filter: (&str, &[&str]),
+    hint: &str,
+) {
+    ui.horizontal(|ui| {
+        let name = path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or_else(|| "none".to_owned(), |n| n.to_string_lossy().into_owned());
+        ui.label(format!("{label}: {name}")).on_hover_text(hint);
+        if ui.small_button("Choose…").clicked()
+            && let Some(chosen) = rfd::FileDialog::new()
+                .add_filter(filter.0, filter.1)
+                .pick_file()
+        {
+            *path = Some(chosen);
+        }
+        if path.is_some() && ui.small_button("Clear").clicked() {
+            *path = None;
+        }
+    });
 }

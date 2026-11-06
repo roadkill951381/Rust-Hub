@@ -23,6 +23,8 @@ class Settings:
     output_dir: Path = field(default_factory=_default_output)
     #: Shape model used when a request names none.
     default_model: str = "hunyuan3d-2"
+    #: Shape model for multiview requests that name none.
+    multiview_model: str = "hunyuan3d-2mv"
     #: Text-to-image model for prompts.
     image_model: str = "hunyuan-dit"
     #: Texture model for ``texture: true``.
@@ -49,6 +51,7 @@ class Settings:
         if out := env("HUB_GEN_OUTPUT"):
             s.output_dir = Path(out)
         s.default_model = env("HUB_GEN_MODEL", s.default_model)
+        s.multiview_model = env("HUB_GEN_MULTIVIEW_MODEL", s.multiview_model)
         s.image_model = env("HUB_GEN_IMAGE_MODEL", s.image_model)
         s.texture_model = env("HUB_GEN_TEXTURE_MODEL", s.texture_model)
         s.device = env("HUB_GEN_DEVICE", s.device)

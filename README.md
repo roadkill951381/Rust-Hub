@@ -16,6 +16,11 @@ them for print. Rigging, texturing and scenes come next.
 - **Generate** a model from a prompt or a picture on your own GPU with
   [hub-gen](services/hub-gen/README.md), a local service running Hunyuan3D 2
   or TripoSG. No per-model fees, nothing leaves your machine.
+- **Game characters from a portrait**: draw front, side and back views that
+  keep a portrait's face (FLUX with PuLID in ComfyUI), build the shape from
+  all three (Hunyuan3D-2mv), paint it, and rig it like a character you
+  already have, keeping its skeleton, rest pose and animations exactly (see
+  [Make a game character](#make-a-game-character)).
 - **Asset library**: every generated or saved model is kept with all its
   versions in plain folders (`~/RustHub/library/<name>/v0001.glb` and an
   `asset.json` that records how each version was made).
@@ -28,7 +33,8 @@ them for print. Rigging, texturing and scenes come next.
 - **Hollow** for resin printing with walls of a set thickness. (Add drain
   holes in your slicer for now.)
 - **Blender jobs**, run in the background: voxel remesh (fuses overlapping
-  parts into one clean shell), decimate, and UV unwrap.
+  parts into one clean shell), decimate, UV unwrap, and rigging a model like
+  an existing character.
 - **Edits** with undo and redo: scale to a size in mm, place on the bed,
   move, rotate, set transform, apply transform, materials, primitives.
 - **Desktop app** with a wgpu viewport (orbit, pan, zoom, click to select),
@@ -109,7 +115,10 @@ unload its models. The hub's ComfyUI writes to `comfyui.log` in the
 | `--model comfyui:my-workflow` | Your own workflow does the whole job |
 
 Built-in workflows: `flux-schnell` and `flux-dev` (FLUX GGUF through
-ComfyUI-GGUF, with `t5xxl_fp8_e4m3fn`, `clip_l` and `ae`) and `hunyuan3d-2.1`
+ComfyUI-GGUF, with `t5xxl_fp8_e4m3fn`, `clip_l` and `ae`), `flux-dev-sheet`
+(a front, side and back turnaround), `flux-pulid` and `flux-pulid-sheet`
+(keep a face; need the ComfyUI_PuLID_Flux_ll nodes, `flux1-dev-Q5_K_S.gguf`
+and `pulid_flux_v0.9.1.safetensors` in `models/pulid`), and `hunyuan3d-2.1`
 (needs `hunyuan_3d_v2.1.safetensors` in `models/checkpoints`; ComfyUI's "Image
 to Model (Hunyuan3D 2.1)" template offers the download). To use your own, open
 it in ComfyUI, choose Workflow > Export (API), and save it as
@@ -126,6 +135,31 @@ that only saves images makes pictures.
 | `HUB_COMFY_PICTURE_WORKFLOW` / `HUB_COMFY_MODEL_WORKFLOW` | `flux-schnell` / `hunyuan3d-2.1` | Defaults for `comfyui` |
 | `HUB_COMFY_KEEP_LOADED` | off | Keep ComfyUI running with its models loaded after a job |
 | `HUB_IMAGE_MODEL` / `HUB_SHAPE_MODEL` | none | Defaults for every request, e.g. `HUB_IMAGE_MODEL=comfyui` |
+
+### Make a game character
+
+Given a portrait and a rigged character from your game, the hub makes a new
+character that looks like the portrait and plays the game's animations:
+
+```sh
+hub generate "Mei, a young woman survivor, red jacket, cargo trousers, boots" \
+    --face portrait.png --multiview --rig-like surv_mei_hi.glb \
+    --materials surv_mei --faces 20000 -o mei.glb
+```
+
+1. FLUX with PuLID in ComfyUI draws a turnaround sheet (front, side, back,
+   A-pose) that keeps the portrait's face. `--face` alone draws one view.
+2. hub-gen cuts the sheet into views, builds the shape from all of them with
+   Hunyuan3D-2mv and paints it with Hunyuan3D-Paint.
+3. Blender fits the model to the reference character (height, facing, arm
+   angles), copies the skin weights, and writes a GLB that keeps the
+   reference's skeleton, inverse bind matrices and animations byte for byte.
+   Skin is split from clothes by colour into `<materials>.body` and
+   `<materials>.clothes`.
+
+`hub rig model.glb --like character.glb -o rigged.glb` runs step 3 alone on a
+model you already have. In the app these options are under Generate >
+Character; Claude has them on the `generate` and `rig` tools.
 
 ### Keep everything up to date
 
@@ -194,7 +228,7 @@ GPU works.
 | Crate | Role |
 |---|---|
 | `hub-core` | Scene model, commands, undo history, file formats, print checks, hollowing, the asset library, and the engine traits. No UI, GPU, process or network code. |
-| `hub-blender` | Runs mesh jobs in Blender in the background (`MeshTools`). |
+| `hub-blender` | Runs mesh jobs and rigging in Blender in the background (`MeshTools`, `Rigger`). |
 | `hub-generate` | HTTP client for the hub-gen service (`Generator`). |
 | `hub-comfy` | Drives the person's ComfyUI and its workflows (`Generator`, and pictures for hub-gen). |
 | `hub-updates` | Checks every piece for newer versions and runs their upgrades. |
@@ -255,5 +289,6 @@ adapter exists at all.
 2. **Generate and print** (this): local AI generation on your own GPU
    (Hunyuan3D 2, TripoSG), asset library, Blender job bridge, wall thickness,
    hole filling, hollowing.
-3. **Character**: UniRig auto-rigging, PBR texturing, animation and retargeting.
+3. **Character**: characters from a portrait rigged like an existing one
+   (started), UniRig auto-rigging, PBR texturing, animation and retargeting.
 4. **Scenes**: the level editor, exporting scenes for three.js.

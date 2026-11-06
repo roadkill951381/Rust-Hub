@@ -22,7 +22,8 @@ use hub_core::engine::{GenerateRequest, Generated, GenerationInfo, Generator, Pr
 use serde_json::{Value, json};
 
 pub use workflows::{
-    FLUX_DEV, FLUX_SCHNELL, HUNYUAN3D_21, MODEL_FILES, Makes, ModelFile, Workflow,
+    FLUX_DEV, FLUX_DEV_SHEET, FLUX_PULID, FLUX_PULID_SHEET, FLUX_SCHNELL, HUNYUAN3D_21,
+    MODEL_FILES, Makes, ModelFile, Workflow,
 };
 
 /// Where ComfyUI listens unless `HUB_COMFY_URL` says otherwise.
@@ -333,10 +334,12 @@ impl ComfyUi {
     }
 
     /// Makes a picture of `prompt` with the picture workflow (or `workflow`)
-    /// and returns where it was saved and the workflow's name.
+    /// and returns where it was saved and the workflow's name. `face` is
+    /// uploaded for workflows that keep a likeness (`{{image}}`).
     pub fn make_picture(
         &self,
         prompt: &str,
+        face: Option<&Path>,
         seed: u64,
         workflow: Option<&str>,
         progress: Progress<'_>,
@@ -347,7 +350,7 @@ impl ComfyUi {
         let saved = self.run(
             &workflow,
             Some(prompt),
-            None,
+            face,
             seed,
             "making the picture in ComfyUI",
             progress,
@@ -556,6 +559,14 @@ impl Generator for ComfyUi {
         progress: Progress<'_>,
     ) -> Result<Generated, String> {
         let started = Instant::now();
+        if request.multiview {
+            return Err(
+                "ComfyUI's Hunyuan3D 2.1 workflow builds from one picture; for \
+                        front, side and back views use hub-gen's hunyuan3d-2mv (leave the \
+                        model unset)"
+                    .into(),
+            );
+        }
         self.ensure_running(progress)?;
         let seed = request.seed.unwrap_or_else(random_seed);
         let prompt = request.prompt.as_deref().filter(|p| !p.trim().is_empty());
@@ -577,8 +588,16 @@ impl Generator for ComfyUi {
                 .as_deref()
                 .and_then(parse_engine)
                 .flatten();
+            let picture_workflow =
+                picture_workflow.or(request.face.is_some().then_some(workflows::FLUX_PULID));
             let half = |f: f32, s: &str| progress(f * 0.4, s);
-            let (path, name) = self.make_picture(prompt, seed, picture_workflow, &half)?;
+            let (path, name) = self.make_picture(
+                prompt,
+                request.face.as_deref(),
+                seed,
+                picture_workflow,
+                &half,
+            )?;
             picture = Some(path);
             image_model = Some(format!("comfyui:{name}"));
         }
@@ -611,6 +630,8 @@ impl Generator for ComfyUi {
                 textured: false,
                 seconds: started.elapsed().as_secs_f32(),
                 image: picture,
+                face: request.face.clone(),
+                ..GenerationInfo::default()
             },
         })
     }

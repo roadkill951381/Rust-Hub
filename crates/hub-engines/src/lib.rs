@@ -3,7 +3,7 @@
 //!
 //! | Engine | Found through |
 //! |---|---|
-//! | Blender | `HUB_BLENDER`, the `PATH`, standard install folders (on first use) |
+//! | Blender (mesh tools, rigging) | `HUB_BLENDER`, the `PATH`, standard install folders (on first use) |
 //! | Generation service | `HUB_GEN_URL` (default `http://127.0.0.1:8765`), `HUB_GEN_TOKEN` |
 //! | ComfyUI | `HUB_COMFY_URL` (default `http://127.0.0.1:8188`), `HUB_COMFY_DIR` to start it |
 //! | Asset library | `HUB_LIBRARY` (default `~/RustHub/library`) |
@@ -56,9 +56,11 @@ pub fn build(config: &Config) -> Engines {
         .clone()
         .or_else(Library::default_root)
         .map(Library::open);
+    let blender = Arc::new(LazyBlender::new());
     Engines {
-        mesh_tools: Some(Arc::new(LazyBlender::new())),
+        mesh_tools: Some(blender.clone()),
         generator: Some(Arc::new(generators)),
+        rigger: Some(blender),
         library,
     }
 }
@@ -66,9 +68,10 @@ pub fn build(config: &Config) -> Engines {
 /// Routes generation between hub-gen and ComfyUI.
 ///
 /// - `model: "comfyui[:workflow]"`: the whole job in ComfyUI.
-/// - `image_model: "comfyui[:workflow]"` with a prompt: ComfyUI makes the
-///   picture, then stops it (if the hub started it) or unloads its models,
-///   so hub-gen has the GPU and memory for the shape.
+/// - `image_model: "comfyui[:workflow]"` with a prompt, or a `face` to keep:
+///   ComfyUI makes the picture (FLUX with PuLID for a face, a turnaround
+///   sheet for `multiview`), then stops it (if the hub started it) or unloads
+///   its models, so hub-gen has the GPU and memory for the shape.
 /// - Anything else: hub-gen.
 #[derive(Debug)]
 pub struct Generators {
@@ -100,12 +103,7 @@ impl Generator for Generators {
         if request.model.as_deref().and_then(parse_engine).is_some() {
             return self.comfy.generate(&request, progress);
         }
-        let comfy_picture = request
-            .image_model
-            .as_deref()
-            .and_then(parse_engine)
-            .filter(|_| request.image.is_none());
-        let Some(workflow) = comfy_picture else {
+        let Picture::Comfy(workflow) = picture_workflow(&request) else {
             return self.hub_gen.generate(&request, progress);
         };
         let prompt = request
@@ -115,7 +113,9 @@ impl Generator for Generators {
             .ok_or("give a prompt for ComfyUI to draw, or a picture")?;
         let seed = request.seed.unwrap_or_else(hub_comfy::random_seed);
         let first = |f: f32, s: &str| progress(f * 0.3, s);
-        let (picture, name) = self.comfy.make_picture(&prompt, seed, workflow, &first)?;
+        let (picture, name) =
+            self.comfy
+                .make_picture(&prompt, request.face.as_deref(), seed, workflow, &first)?;
         if self.comfy.config().free_after {
             progress(0.3, "freeing ComfyUI's memory");
             self.comfy.release();
@@ -128,5 +128,77 @@ impl Generator for Generators {
         generated.info.image_model = Some(format!("comfyui:{name}"));
         generated.info.image = Some(picture);
         Ok(generated)
+    }
+}
+
+/// Who draws the picture for a prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Picture<'a> {
+    /// hub-gen, or nobody because a picture was given.
+    HubGen,
+    /// ComfyUI, with this workflow or the configured default.
+    Comfy(Option<&'a str>),
+}
+
+/// A named workflow wins; otherwise a face picks `PuLID` and `multiview` a
+/// turnaround sheet.
+fn picture_workflow(request: &GenerateRequest) -> Picture<'_> {
+    if request.image.is_some() {
+        return Picture::HubGen;
+    }
+    let named = request.image_model.as_deref().and_then(parse_engine);
+    if named.is_none() && request.face.is_none() {
+        return Picture::HubGen;
+    }
+    let chosen = match (request.face.is_some(), request.multiview) {
+        (true, true) => Some(hub_comfy::FLUX_PULID_SHEET),
+        (true, false) => Some(hub_comfy::FLUX_PULID),
+        (false, true) => Some(hub_comfy::FLUX_DEV_SHEET),
+        (false, false) => None,
+    };
+    Picture::Comfy(named.flatten().or(chosen))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(image_model: Option<&str>, face: bool, multiview: bool) -> GenerateRequest {
+        GenerateRequest {
+            prompt: Some("a knight".into()),
+            image_model: image_model.map(Into::into),
+            face: face.then(|| PathBuf::from("face.png")),
+            multiview,
+            ..GenerateRequest::default()
+        }
+    }
+
+    #[test]
+    fn faces_and_turnarounds_pick_their_comfy_workflows() {
+        assert_eq!(picture_workflow(&request(None, false, false)), Picture::HubGen);
+        assert_eq!(picture_workflow(&request(None, false, true)), Picture::HubGen);
+        assert_eq!(
+            picture_workflow(&request(Some("comfyui"), false, false)),
+            Picture::Comfy(None)
+        );
+        assert_eq!(
+            picture_workflow(&request(Some("comfyui"), false, true)),
+            Picture::Comfy(Some(hub_comfy::FLUX_DEV_SHEET))
+        );
+        assert_eq!(
+            picture_workflow(&request(None, true, false)),
+            Picture::Comfy(Some(hub_comfy::FLUX_PULID))
+        );
+        assert_eq!(
+            picture_workflow(&request(Some("hunyuan-dit"), true, true)),
+            Picture::Comfy(Some(hub_comfy::FLUX_PULID_SHEET))
+        );
+        assert_eq!(
+            picture_workflow(&request(Some("comfyui:mine"), true, true)),
+            Picture::Comfy(Some("mine"))
+        );
+        let mut given = request(Some("comfyui"), true, true);
+        given.image = Some("picture.png".into());
+        assert_eq!(picture_workflow(&given), Picture::HubGen);
     }
 }

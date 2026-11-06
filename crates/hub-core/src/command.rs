@@ -183,6 +183,38 @@ pub enum Command {
         /// Scale so the longest side is this many mm.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         size_mm: Option<f32>,
+        /// A portrait (PNG or JPEG) whose face the character keeps; the
+        /// picture is drawn in ComfyUI with PuLID.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face: Option<PathBuf>,
+        /// Draw the front, side and back, and build the shape from all of
+        /// them (Hunyuan3D-2mv): truer backs, hair and profiles.
+        #[serde(default)]
+        multiview: bool,
+        /// A rigged character (.glb) to rig the result like: the same
+        /// skeleton, rest pose and animations, so a game can swap it in. The
+        /// rigged file is the one saved to the library.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rig_like: Option<PathBuf>,
+        /// Start of the material names when rigging, e.g. `surv_mei` for
+        /// `surv_mei.body` and `surv_mei.clothes`; the reference's by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        materials: Option<String>,
+    },
+    /// Rig a model (.glb) like an existing rigged character (.glb) with
+    /// Blender: the character's skeleton, rest pose and animations are kept
+    /// exactly and its meshes are swapped for the model, skinned to the same
+    /// bones. Writes `output` and adds the result to the scene to look at.
+    Rig {
+        model: PathBuf,
+        reference: PathBuf,
+        output: PathBuf,
+        /// Reduce the model to about this many triangles first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        triangles: Option<u32>,
+        /// Start of the material names, e.g. `surv_mei`; the reference's by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        materials: Option<String>,
     },
     /// Save objects as a new version of a library asset.
     SaveAsset {
@@ -250,6 +282,7 @@ impl Command {
                 | Command::Decimate { .. }
                 | Command::UvUnwrap { .. }
                 | Command::Generate { .. }
+                | Command::Rig { .. }
         )
     }
 
@@ -273,6 +306,7 @@ impl Command {
             Command::Decimate { .. } => "Decimate",
             Command::UvUnwrap { .. } => "UV unwrap",
             Command::Generate { .. } => "Generate",
+            Command::Rig { .. } => "Rig",
             Command::SaveAsset { .. } => "Save asset",
             Command::LoadAsset { .. } => "Load asset",
             Command::ListAssets { .. } => "List assets",

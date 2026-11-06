@@ -23,11 +23,31 @@ pub const FLUX_SCHNELL: &str = "flux-schnell";
 pub const FLUX_DEV: &str = "flux-dev";
 /// Shape from a picture with ComfyUI's built-in Hunyuan3D 2.1 nodes.
 pub const HUNYUAN3D_21: &str = "hunyuan3d-2.1";
+/// A turnaround sheet (front, side facing left, back) with FLUX.1-dev, for
+/// multiview shape models.
+pub const FLUX_DEV_SHEET: &str = "flux-dev-sheet";
+/// A full-length character with the face of `{{image}}`: FLUX.1-dev with
+/// PuLID (`ComfyUI_PuLID_Flux_ll`), a smaller FLUX so both fit 12 GB.
+pub const FLUX_PULID: &str = "flux-pulid";
+/// [`FLUX_PULID`] as a turnaround sheet.
+pub const FLUX_PULID_SHEET: &str = "flux-pulid-sheet";
 
 /// Words added to a prompt so the picture suits a shape model: one whole
 /// object, centred, on a plain background.
 const PICTURE_STYLE: &str = ", a single complete object, full view, centered, plain white \
                              background, soft even studio lighting, no shadows, high detail";
+
+/// Words for a whole standing figure that a rig can be fitted to.
+const FIGURE_STYLE: &str = "full-length shot of the whole body from head to toes, feet \
+                            fully visible, empty space above the head and below the feet, \
+                            standing straight in an A-pose with the arms held away from the \
+                            body and the hands open, plain light grey background, soft even \
+                            studio lighting, no shadows, high detail";
+
+/// Words for a turnaround sheet that multiview shape models split into views.
+const SHEET_STYLE: &str = "character turnaround reference sheet, the same character shown \
+                           three times side by side, evenly spaced and not overlapping: \
+                           front view, side view facing left, back view";
 
 /// What a workflow makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +92,8 @@ impl Workflow {
             });
             format!(
                 "no ComfyUI workflow called {name:?}: the built-in ones are {FLUX_SCHNELL}, \
-                 {FLUX_DEV} and {HUNYUAN3D_21}{folder}"
+                 {FLUX_DEV}, {FLUX_DEV_SHEET}, {FLUX_PULID}, {FLUX_PULID_SHEET} and \
+                 {HUNYUAN3D_21}{folder}"
             )
         })?;
         Ok(Self {
@@ -141,10 +162,15 @@ impl Workflow {
             return Err(format!("the ComfyUI workflow {} needs a prompt", self.name));
         }
         if self.uses("{{image}}") && image.is_none() {
-            return Err(format!(
-                "the ComfyUI workflow {} needs a picture",
-                self.name
-            ));
+            return Err(if self.uses("{{prompt}}") {
+                format!(
+                    "the ComfyUI workflow {} needs a face picture (a portrait) as well as \
+                     the prompt",
+                    self.name
+                )
+            } else {
+                format!("the ComfyUI workflow {} needs a picture", self.name)
+            });
         }
         let mut graph = self.graph.clone();
         walk(&mut graph, prompt.unwrap_or(""), image.unwrap_or(""), seed);
@@ -170,13 +196,41 @@ fn check_api_format(graph: &Value, path: &Path) -> Result<(), String> {
 }
 
 fn builtin(name: &str) -> Option<Value> {
+    let object = Shot {
+        style: PICTURE_STYLE.to_owned(),
+        width: 1024,
+        height: 1024,
+    };
+    let figure = Shot {
+        style: format!(", {FIGURE_STYLE}"),
+        width: 832,
+        height: 1216,
+    };
+    let sheet = Shot {
+        style: format!(", {SHEET_STYLE}, each {FIGURE_STYLE}"),
+        width: 1536,
+        height: 768,
+    };
     match name {
-        FLUX_SCHNELL => Some(flux("flux1-schnell-Q8_0.gguf", 4, None)),
-        FLUX_DEV => Some(flux("flux1-dev-Q8_0.gguf", 20, Some(3.5))),
+        FLUX_SCHNELL => Some(flux("flux1-schnell-Q8_0.gguf", 4, None, &object)),
+        FLUX_DEV => Some(flux("flux1-dev-Q8_0.gguf", 20, Some(3.5), &object)),
+        FLUX_DEV_SHEET => Some(flux("flux1-dev-Q8_0.gguf", 24, Some(3.5), &sheet)),
+        FLUX_PULID => Some(with_pulid(flux(PULID_UNET, 24, Some(3.5), &figure))),
+        FLUX_PULID_SHEET => Some(with_pulid(flux(PULID_UNET, 24, Some(3.5), &sheet))),
         HUNYUAN3D_21 => Some(hunyuan3d_21()),
         _ => None,
     }
 }
+
+/// The text after the prompt and the picture's size.
+struct Shot {
+    style: String,
+    width: u32,
+    height: u32,
+}
+
+/// FLUX.1-dev small enough to share 12 GB with PuLID's encoders.
+const PULID_UNET: &str = "flux1-dev-Q5_K_S.gguf";
 
 /// A model file a built-in workflow loads, and where it comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,7 +248,14 @@ pub struct ModelFile {
 
 const UNET: &[&str] = &["unet", "diffusion_models"];
 const TEXT: &[&str] = &["text_encoders", "clip"];
-const FLUXES: &[&str] = &[FLUX_SCHNELL, FLUX_DEV];
+const FLUXES: &[&str] = &[
+    FLUX_SCHNELL,
+    FLUX_DEV,
+    FLUX_DEV_SHEET,
+    FLUX_PULID,
+    FLUX_PULID_SHEET,
+];
+const PULIDS: &[&str] = &[FLUX_PULID, FLUX_PULID_SHEET];
 
 /// Every file the built-in workflows load.
 pub const MODEL_FILES: &[ModelFile] = &[
@@ -210,7 +271,21 @@ pub const MODEL_FILES: &[ModelFile] = &[
         folders: UNET,
         repo: "city96/FLUX.1-dev-gguf",
         gated: false,
-        workflows: &[FLUX_DEV],
+        workflows: &[FLUX_DEV, FLUX_DEV_SHEET],
+    },
+    ModelFile {
+        name: PULID_UNET,
+        folders: UNET,
+        repo: "city96/FLUX.1-dev-gguf",
+        gated: false,
+        workflows: PULIDS,
+    },
+    ModelFile {
+        name: "pulid_flux_v0.9.1.safetensors",
+        folders: &["pulid"],
+        repo: "guozinan/PuLID",
+        gated: false,
+        workflows: PULIDS,
     },
     ModelFile {
         name: "t5xxl_fp8_e4m3fn.safetensors",
@@ -243,7 +318,7 @@ pub const MODEL_FILES: &[ModelFile] = &[
 ];
 
 /// FLUX through ComfyUI-GGUF's loader, the way a 12 to 16 GB card runs it.
-fn flux(unet: &str, steps: u32, guidance: Option<f32>) -> Value {
+fn flux(unet: &str, steps: u32, guidance: Option<f32>, shot: &Shot) -> Value {
     let positive = if guidance.is_some() {
         json!(["10", 0])
     } else {
@@ -258,12 +333,12 @@ fn flux(unet: &str, steps: u32, guidance: Option<f32>) -> Value {
         }},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": "ae.safetensors"}},
         "4": {"class_type": "CLIPTextEncode", "inputs": {
-            "text": format!("{{{{prompt}}}}{PICTURE_STYLE}"),
+            "text": format!("{{{{prompt}}}}{}", shot.style),
             "clip": ["2", 0]
         }},
         "5": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["4", 0]}},
         "6": {"class_type": "EmptySD3LatentImage", "inputs": {
-            "width": 1024, "height": 1024, "batch_size": 1
+            "width": shot.width, "height": shot.height, "batch_size": 1
         }},
         "7": {"class_type": "KSampler", "inputs": {
             "model": ["1", 0],
@@ -287,6 +362,36 @@ fn flux(unet: &str, steps: u32, guidance: Option<f32>) -> Value {
             "conditioning": ["4", 0], "guidance": g
         }});
     }
+    graph
+}
+
+/// Puts PuLID between the FLUX model and the sampler, so the picture keeps
+/// the face in `{{image}}` (`ComfyUI_PuLID_Flux_ll` nodes; its EVA-CLIP and
+/// InsightFace models download on first use).
+fn with_pulid(mut graph: Value) -> Value {
+    graph["20"] = json!({"class_type": "PulidFluxModelLoader", "inputs": {
+        "pulid_file": "pulid_flux_v0.9.1.safetensors"
+    }});
+    graph["21"] = json!({"class_type": "PulidFluxEvaClipLoader", "inputs": {}});
+    graph["22"] =
+        json!({"class_type": "PulidFluxInsightFaceLoader", "inputs": {"provider": "CUDA"}});
+    graph["23"] = json!({"class_type": "LoadImage", "inputs": {"image": "{{image}}"}});
+    graph["24"] = json!({"class_type": "ApplyPulidFlux", "inputs": {
+        "model": ["1", 0],
+        "pulid_flux": ["20", 0],
+        "eva_clip": ["21", 0],
+        "face_analysis": ["22", 0],
+        "image": ["23", 0],
+        "weight": 1.0,
+        "start_at": 0.0,
+        "end_at": 1.0,
+        "fusion": "mean",
+        "fusion_weight_max": 1.0,
+        "fusion_weight_min": 0.0,
+        "train_step": 1000,
+        "use_gray": true
+    }});
+    graph["7"]["inputs"]["model"] = json!(["24", 0]);
     graph
 }
 
@@ -375,8 +480,46 @@ mod tests {
     }
 
     #[test]
+    fn character_workflows_take_a_face_and_draw_whole_figures() {
+        let pulid = Workflow::load(FLUX_PULID, None).unwrap();
+        assert_eq!(pulid.makes(), Makes::Picture);
+        let err = pulid.fill(Some("Mei"), None, 1).unwrap_err();
+        assert!(err.contains("face picture"), "{err}");
+        let g = pulid.fill(Some("Mei"), Some("mei.png"), 12).unwrap();
+        assert_eq!(g["23"]["inputs"]["image"], json!("mei.png"));
+        assert_eq!(g["7"]["inputs"]["model"], json!(["24", 0]));
+        assert!(
+            g["4"]["inputs"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("A-pose")
+        );
+
+        let sheet = Workflow::load(FLUX_PULID_SHEET, None).unwrap();
+        let g = sheet.fill(Some("Mei"), Some("mei.png"), 12).unwrap();
+        assert_eq!(g["6"]["inputs"]["width"], json!(1536));
+        let text = g["4"]["inputs"]["text"].as_str().unwrap();
+        assert!(
+            text.contains("front view, side view facing left, back view"),
+            "{text}"
+        );
+        assert!(
+            !Workflow::load(FLUX_DEV_SHEET, None)
+                .unwrap()
+                .uses("{{image}}")
+        );
+    }
+
+    #[test]
     fn every_file_a_builtin_loads_is_listed() {
-        for name in [FLUX_SCHNELL, FLUX_DEV, HUNYUAN3D_21] {
+        for name in [
+            FLUX_SCHNELL,
+            FLUX_DEV,
+            FLUX_DEV_SHEET,
+            FLUX_PULID,
+            FLUX_PULID_SHEET,
+            HUNYUAN3D_21,
+        ] {
             let graph = builtin(name).unwrap().to_string();
             let listed: Vec<_> = MODEL_FILES
                 .iter()

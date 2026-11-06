@@ -18,6 +18,14 @@ class GenerateRequest(BaseModel):
     seed: int | None = Field(None, ge=0, le=2**32 - 1)
     faces: int | None = Field(None, ge=500, le=5_000_000, description="Target triangle count.")
     steps: int | None = Field(None, ge=1, le=200, description="Override the model's step count.")
+    multiview: bool = Field(
+        False,
+        description=(
+            "The picture is a turnaround sheet (drawn as one when made from the prompt): "
+            "front, side facing left and back, left to right. The shape is built from "
+            "all three views with a multiview model."
+        ),
+    )
 
     @model_validator(mode="after")
     def needs_prompt_or_image(self) -> GenerateRequest:
@@ -41,6 +49,8 @@ class JobResult(BaseModel):
     seed: int
     seconds: float
     textured: bool
+    #: The views the shape was built from, e.g. ["front", "left", "back"].
+    views: list[str] = []
     triangles: int
     vertices: int
     #: File name -> URL path, e.g. {"mesh.glb": "/v1/jobs/<id>/files/mesh.glb"}.
@@ -60,6 +70,7 @@ class JobView(BaseModel):
 class ModelInfo(BaseModel):
     name: str
     kind: str
+    multiview: bool = False
     available: bool
     loaded: bool
     vram_gb: float
@@ -73,6 +84,7 @@ class Health(BaseModel):
     device: str
     default_model: str
     image_model: str
+    multiview_model: str = ""
     texture_model: str
     queued: int
     models: list[ModelInfo]
