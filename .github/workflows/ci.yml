@@ -52,7 +52,10 @@ jobs:
         working-directory: services/hub-gen
         run: |
           uv sync
-          nohup uv run hub-gen serve --demo --port 8765 --token ci > "$RUNNER_TEMP/hub-gen.log" 2>&1 &
+          # Run the installed script, not `uv run`: a running uv holds the uv
+          # cache lock and stalls the cache step at the end of the job.
+          nohup .venv/bin/hub-gen serve --demo --port 8765 --token ci > "$RUNNER_TEMP/hub-gen.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/hub-gen.pid"
           for i in $(seq 60); do
             curl -sf -H "Authorization: Bearer ci" http://127.0.0.1:8765/health && exit 0
             sleep 1
@@ -66,6 +69,9 @@ jobs:
         run: |
           cargo test -p hub-generate
           cargo test -p hub-mcp --test generate_gate
+      - name: Stop hub-gen
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/hub-gen.pid")" 2>/dev/null || true
 
   build:
     strategy:
