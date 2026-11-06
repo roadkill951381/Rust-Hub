@@ -814,7 +814,7 @@ fn library(engines: &Engines) -> Result<&Library> {
 fn mesh_tools(engines: &Engines) -> Result<&dyn crate::engine::MeshTools> {
     engines.mesh_tools.as_deref().ok_or_else(|| {
         Error::Engine(
-            "Blender is needed for this and was not found. Install Blender 5.1 or newer \
+            "Blender is needed for this and was not found. Install Blender (4.2 or newer) \
              from blender.org, or set HUB_BLENDER to the blender executable"
                 .into(),
         )

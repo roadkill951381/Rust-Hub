@@ -51,7 +51,7 @@ impl Blender {
             }
         }
         Err(if tried.is_empty() {
-            "Blender was not found. Install Blender 5.1 or newer from blender.org, \
+            "Blender was not found. Install Blender (4.2 or newer) from blender.org, \
              or set HUB_BLENDER to the blender executable"
                 .to_owned()
         } else {
