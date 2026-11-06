@@ -15,6 +15,7 @@ pub mod workflows;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hub_core::engine::{GenerateRequest, Generated, GenerationInfo, Generator, Progress};
@@ -132,9 +133,46 @@ pub struct Saved {
     pub models: Vec<SavedFile>,
 }
 
+/// A ComfyUI the hub started, stopped when no longer needed.
+#[derive(Debug, Default)]
+struct Started {
+    child: Mutex<Option<std::process::Child>>,
+    /// Stop it when the hub is done with it (not with `HUB_COMFY_KEEP_LOADED`).
+    stop: bool,
+}
+
+impl Started {
+    /// Stops the process if the hub started it; true if it did.
+    fn stop(&self) -> bool {
+        let child = self
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(mut child) = child else {
+            return false;
+        };
+        if matches!(child.try_wait(), Ok(None)) {
+            tracing::info!(pid = child.id(), "stopping the ComfyUI the hub started");
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+        true
+    }
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        if self.stop {
+            self.stop();
+        }
+    }
+}
+
 /// A connection to a ComfyUI.
 #[derive(Debug, Clone)]
 pub struct ComfyUi {
+    started: Arc<Started>,
     config: Config,
     base: String,
     agent: ureq::Agent,
@@ -153,6 +191,10 @@ impl ComfyUi {
             .into();
         Self {
             base: config.url.trim_end_matches('/').to_owned(),
+            started: Arc::new(Started {
+                child: Mutex::new(None),
+                stop: config.free_after,
+            }),
             config,
             agent,
             cache: std::env::temp_dir().join("rust-hub").join("comfyui"),
@@ -219,12 +261,17 @@ impl ComfyUi {
         let started = Instant::now();
         loop {
             if self.is_running() {
+                *self
+                    .started
+                    .child
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(child);
                 return Ok(());
             }
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(format!(
                     "ComfyUI stopped while starting ({status}). Start it by hand to see why; {}",
-                    launch.log_hint(&self.cache)
+                    Launch::log_hint(&self.cache)
                 ));
             }
             if started.elapsed() > self.start_timeout {
@@ -235,6 +282,18 @@ impl ComfyUi {
                 ));
             }
             std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    /// Gives the GPU and memory back after a job: stops ComfyUI if the hub
+    /// started it, else asks it to unload its models. Does nothing with
+    /// `HUB_COMFY_KEEP_LOADED`.
+    pub fn release(&self) {
+        if !self.config.free_after {
+            return;
+        }
+        if !self.started.stop() {
+            self.free_memory();
         }
     }
 
@@ -532,9 +591,7 @@ impl Generator for ComfyUi {
             "making the 3D model in ComfyUI",
             &rest,
         );
-        if self.config.free_after {
-            self.free_memory();
-        }
+        self.release();
         let saved = saved?;
         let file = saved.models.last().ok_or_else(|| {
             format!(
@@ -719,29 +776,26 @@ impl Launch {
     }
 
     fn spawn(&self, log_dir: &Path) -> Result<std::process::Child, String> {
+        std::fs::create_dir_all(log_dir)
+            .map_err(|e| format!("could not create {}: {e}", log_dir.display()))?;
+        let log = std::fs::File::create(log_dir.join("comfyui.log"))
+            .map_err(|e| format!("could not create the ComfyUI log: {e}"))?;
+        let err = log.try_clone().map_err(|e| e.to_string())?;
         let mut command = Command::new(&self.program);
+        // Its own output file, never the hub's handles: a pipe reading the
+        // hub's output would otherwise stay open until ComfyUI exits.
         command
             .args(&self.args)
             .current_dir(&self.cwd)
-            .stdin(Stdio::null());
+            .stdin(Stdio::null())
+            .stdout(log)
+            .stderr(err);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt as _;
-            // Its own console window, as when started by hand, which also keeps
-            // it running after the hub closes.
-            const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-            command.creation_flags(CREATE_NEW_CONSOLE);
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
         }
-        #[cfg(not(windows))]
-        {
-            std::fs::create_dir_all(log_dir)
-                .map_err(|e| format!("could not create {}: {e}", log_dir.display()))?;
-            let log = std::fs::File::create(log_dir.join("comfyui.log"))
-                .map_err(|e| format!("could not create the ComfyUI log: {e}"))?;
-            let err = log.try_clone().map_err(|e| e.to_string())?;
-            command.stdout(log).stderr(err);
-        }
-        let _ = log_dir;
         command.spawn().map_err(|e| {
             format!(
                 "could not start ComfyUI with {}: {e}",
@@ -750,15 +804,8 @@ impl Launch {
         })
     }
 
-    fn log_hint(&self, log_dir: &Path) -> String {
-        if cfg!(windows) {
-            format!(
-                "its window showed the reason (folder {})",
-                self.cwd.display()
-            )
-        } else {
-            format!("its output is in {}", log_dir.join("comfyui.log").display())
-        }
+    fn log_hint(log_dir: &Path) -> String {
+        format!("its output is in {}", log_dir.join("comfyui.log").display())
     }
 }
 
@@ -825,6 +872,25 @@ mod tests {
         assert_eq!(port_of("http://127.0.0.1:8188"), 8188);
         assert_eq!(port_of("http://box:9000/"), 9000);
         assert_eq!(port_of("http://localhost"), 8188);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_started_comfyui_is_stopped_once_done() {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let started = Started {
+            child: Mutex::new(Some(child)),
+            stop: true,
+        };
+        assert!(started.stop(), "it was the hub's");
+        assert!(!started.stop(), "only once");
+        let alive = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "the process is gone");
     }
 
     #[test]

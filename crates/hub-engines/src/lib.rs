@@ -67,7 +67,8 @@ pub fn build(config: &Config) -> Engines {
 ///
 /// - `model: "comfyui[:workflow]"`: the whole job in ComfyUI.
 /// - `image_model: "comfyui[:workflow]"` with a prompt: ComfyUI makes the
-///   picture, then unloads its models so hub-gen has the GPU for the shape.
+///   picture, then stops it (if the hub started it) or unloads its models,
+///   so hub-gen has the GPU and memory for the shape.
 /// - Anything else: hub-gen.
 #[derive(Debug)]
 pub struct Generators {
@@ -116,8 +117,8 @@ impl Generator for Generators {
         let first = |f: f32, s: &str| progress(f * 0.3, s);
         let (picture, name) = self.comfy.make_picture(&prompt, seed, workflow, &first)?;
         if self.comfy.config().free_after {
-            progress(0.3, "freeing ComfyUI's GPU memory");
-            self.comfy.free_memory();
+            progress(0.3, "freeing ComfyUI's memory");
+            self.comfy.release();
         }
         request.image = Some(picture.clone());
         request.image_model = None;

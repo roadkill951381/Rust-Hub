@@ -8,7 +8,7 @@
 //! | ComfyUI | `comfyui_version.py` | GitHub releases | its update script, or `git pull` |
 //! | ComfyUI custom nodes | their git checkouts | `git fetch` | `git pull` |
 //! | ComfyUI model files | `ComfyUI/models` | (files have no versions) | download |
-//! | Blender | `blender --version` | download.blender.org | winget, or blender.org |
+//! | Blender | `blender --version` | release tags on projects.blender.org | winget, or blender.org |
 //! | uv, Rust, NVIDIA driver | their own commands | GitHub, `rustup check` | `uv self update`, `rustup update` |
 //!
 //! [`check`] only reads: it contacts those sites and runs version commands,

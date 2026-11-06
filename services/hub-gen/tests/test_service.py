@@ -143,3 +143,26 @@ def test_versions_report_packages_and_cached_weights(client, tmp_path, monkeypat
     assert set(hunyuan["models"]) == {"hunyuan3d-2", "hunyuan3d-paint"}
     assert weights["tencent/Hunyuan3D-2mini"]["revision"] is None
     assert body["project_dir"].endswith("hub-gen")
+
+
+def test_extras_count_only_when_all_their_packages_are_installed(monkeypatch):
+    from hub_gen import versions as v
+
+    reqs = [
+        {"name": "fastapi", "wanted": ">=0.115", "url": None, "extra": None, "conditional": False},
+        # pydantic is installed, but the extra's other package is not.
+        {"name": "pydantic", "wanted": "", "url": None, "extra": "flux", "conditional": False},
+        {"name": "no-such-pkg", "wanted": "", "url": None, "extra": "flux", "conditional": False},
+        # Only platform-specific packages missing: the extra still counts.
+        {"name": "numpy", "wanted": "", "url": None, "extra": "hunyuan", "conditional": False},
+        {
+            "name": "no-such-gpu-pkg",
+            "wanted": "",
+            "url": None,
+            "extra": "hunyuan",
+            "conditional": True,
+        },
+    ]
+    assert v.extras(reqs) == ["hunyuan"]
+    names = {p["name"] for p in v.packages(reqs)}
+    assert names == {"fastapi", "numpy"}, "flux's pydantic is not reported"

@@ -20,8 +20,13 @@ pub fn output(
 
 /// As [`output`], but keeps the output of a failing exit too (`rustup check`
 /// exits with 100 when an update is available).
-pub fn output_any_exit(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
-    capture(program, args, None, timeout, true)
+pub fn output_any_exit(
+    program: &Path,
+    args: &[&str],
+    dir: Option<&Path>,
+    timeout: Duration,
+) -> Option<String> {
+    capture(program, args, dir, timeout, true)
 }
 
 fn capture(

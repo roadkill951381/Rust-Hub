@@ -54,6 +54,8 @@ def _requirements() -> list[dict[str, Any]]:
         rest = spec[m.end() :].strip()
         url = rest[1:].strip() if rest.startswith("@") else None
         extra = _EXTRA.search(marker)
+        # Anything but the extra, e.g. a platform condition.
+        other = re.sub(r"\b(and|or)\b|[()\s]", "", _EXTRA.sub("", marker))
         found.setdefault(
             m.group(1).lower(),
             {
@@ -61,6 +63,7 @@ def _requirements() -> list[dict[str, Any]]:
                 "wanted": "" if url else rest.strip("() "),
                 "url": url,
                 "extra": extra.group(1) if extra else None,
+                "conditional": bool(other),
             },
         )
     return list(found.values())
@@ -79,23 +82,45 @@ def _installed_commit(name: str) -> str | None:
         return None
 
 
-def packages() -> list[dict[str, Any]]:
+def _installed(name: str) -> str | None:
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def extras(reqs: list[dict[str, Any]] | None = None) -> list[str]:
+    """Extras that were synced: every one of their packages is installed
+    (platform-specific ones aside). A package another dependency pulled in
+    does not make its extra count."""
+    reqs = _requirements() if reqs is None else reqs
+    by_extra: dict[str, list[dict[str, Any]]] = {}
+    for r in reqs:
+        if r["extra"]:
+            by_extra.setdefault(r["extra"], []).append(r)
+    return sorted(
+        e
+        for e, rs in by_extra.items()
+        if all(_installed(r["name"]) for r in rs if not r["conditional"])
+    )
+
+
+def packages(
+    reqs: list[dict[str, Any]] | None = None, active: list[str] | None = None
+) -> list[dict[str, Any]]:
     """hub-gen's direct dependencies that are installed, with the range
-    pyproject.toml allows. Extras that were not installed are left out."""
+    pyproject.toml allows, leaving out extras that were not synced."""
+    reqs = _requirements() if reqs is None else reqs
+    active = extras(reqs) if active is None else active
     out = []
-    for req in _requirements():
-        try:
-            installed = metadata.version(req["name"])
-        except metadata.PackageNotFoundError:
+    for req in reqs:
+        if req["extra"] and req["extra"] not in active:
+            continue
+        installed = _installed(req["name"])
+        if installed is None:
             continue
         out.append({**req, "installed": installed, "commit": _installed_commit(req["name"])})
     return out
-
-
-def extras(pkgs: list[dict[str, Any]] | None = None) -> list[str]:
-    """Extras whose packages are installed, for ``uv sync --extra``."""
-    pkgs = packages() if pkgs is None else pkgs
-    return sorted({p["extra"] for p in pkgs if p["extra"]})
 
 
 def _repo_dir(repo: str) -> Path:
@@ -138,13 +163,14 @@ def weights() -> list[dict[str, Any]]:
 
 
 def report() -> dict[str, Any]:
-    pkgs = packages()
+    reqs = _requirements()
+    active = extras(reqs)
     return {
         "version": __version__,
         "project_dir": str(project_dir()),
         "python": sys.executable,
-        "extras": extras(pkgs),
-        "packages": pkgs,
+        "extras": active,
+        "packages": packages(reqs, active),
         "weights": weights(),
     }
 

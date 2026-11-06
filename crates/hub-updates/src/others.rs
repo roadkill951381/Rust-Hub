@@ -111,8 +111,12 @@ fn rust() -> Option<Item> {
     let rustc = run("rustc", &["--version"], 10)?;
     let installed = rustc.split_whitespace().nth(1)?.to_owned();
     let mut item = Item::new("rust", "Rust (builds the hub)", Status::Unknown).installed(installed);
-    let Some(report) = output_any_exit(Path::new("rustup"), &["check"], Duration::from_secs(60))
-    else {
+    let Some(report) = output_any_exit(
+        Path::new("rustup"),
+        &["check"],
+        None,
+        Duration::from_secs(60),
+    ) else {
         return Some(item.detail("rustup check failed or isn't installed"));
     };
     let line = report

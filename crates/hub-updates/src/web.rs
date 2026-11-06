@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::Version;
+
 /// Base addresses, overridable so tests can stand in for each site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sources {
@@ -21,7 +23,7 @@ impl Default for Sources {
             pypi: "https://pypi.org".into(),
             huggingface: "https://huggingface.co".into(),
             github: "https://api.github.com".into(),
-            blender: "https://download.blender.org".into(),
+            blender: "https://projects.blender.org".into(),
         }
     }
 }
@@ -92,7 +94,9 @@ impl Web {
                     "GitHub refused {url} ({status}); its hourly limit for anonymous checks \
                      may be used up: wait, or set HUB_GITHUB_TOKEN"
                 ),
-                401 | 403 => format!("{url} needs a sign-in ({status}); set HF_TOKEN"),
+                401 | 403 if url.starts_with(&self.sources.huggingface) => {
+                    format!("{url} needs a Hugging Face sign-in ({status}); set HF_TOKEN")
+                }
                 _ => format!("{url} answered {status}"),
             })
         }
@@ -167,45 +171,28 @@ impl Web {
         self.json(&url, self.github_token.as_deref())
     }
 
-    /// The newest Blender release, e.g. `5.2.3`, from the download site's
-    /// folder listings.
+    /// The newest Blender release, e.g. `5.2.3`, from the release tags on
+    /// projects.blender.org (download.blender.org turns scripts away).
     pub fn blender_latest(&self) -> Result<String, String> {
-        let listing = |path: &str| -> Result<String, String> {
-            let url = format!("{}/release/{path}", self.sources.blender);
-            self.get(&url, None, "text/html")?
-                .with_config()
-                .limit(4 << 20)
-                .read_to_string()
-                .map_err(|e| format!("could not read {url}: {e}"))
-        };
-        let series = links(&listing("")?)
-            .filter_map(|l| {
-                l.strip_prefix("Blender")?
-                    .strip_suffix('/')
-                    .map(str::to_owned)
+        #[derive(Deserialize)]
+        struct Tag {
+            name: String,
+        }
+        let url = format!(
+            "{}/api/v1/repos/blender/blender/tags?limit=50",
+            self.sources.blender
+        );
+        // Newest first by date, mixing the current and LTS series.
+        let tags: Vec<Tag> = self.json(&url, None)?;
+        tags.iter()
+            .filter_map(|t| {
+                let v = Version::parse(&t.name)?;
+                (!v.is_prerelease()).then(|| (v, t.name.trim_start_matches('v').to_owned()))
             })
-            .filter_map(|s| crate::Version::parse(&s).map(|v| (v, s)))
             .max_by(|a, b| a.0.cmp(&b.0))
-            .ok_or("Blender's release listing has no versions")?
-            .1;
-        links(&listing(&format!("Blender{series}/"))?)
-            .filter_map(|l| {
-                let rest = l.strip_prefix("blender-")?;
-                let end = rest.find(|c: char| !(c.is_ascii_digit() || c == '.'))?;
-                Some(rest[..end].trim_end_matches('.').to_owned())
-            })
-            .filter_map(|s| crate::Version::parse(&s).map(|v| (v, s)))
-            .max_by(|a, b| a.0.cmp(&b.0))
-            .map(|(_, s)| s)
-            .ok_or_else(|| format!("no Blender {series} downloads listed"))
+            .map(|(_, name)| name)
+            .ok_or_else(|| "Blender's tag list has no release versions".to_owned())
     }
-}
-
-/// The `href` targets in an HTML folder listing.
-fn links(html: &str) -> impl Iterator<Item = &str> {
-    html.split("href=\"")
-        .skip(1)
-        .filter_map(|rest| rest.split('"').next())
 }
 
 #[cfg(test)]
@@ -213,12 +200,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn listing_links_are_found() {
-        let html = r#"<a href="../">../</a><a href="Blender5.1/">Blender5.1/</a>
-            <a href="Blender5.2/">Blender5.2/</a>"#;
-        assert_eq!(
-            links(html).collect::<Vec<_>>(),
-            ["../", "Blender5.1/", "Blender5.2/"]
-        );
+    fn blender_tags_are_sorted_by_version() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        std::thread::spawn(move || {
+            for request in server.incoming_requests() {
+                let body = r#"[{"name":"v4.5.15"},{"name":"v5.2.2"},{"name":"v5.3.0-rc1"},
+                    {"name":"v5.2.3"},{"name":"v4.2.23"}]"#;
+                let _ = request.respond(tiny_http::Response::from_string(body));
+            }
+        });
+        let web = Web::new(Sources {
+            blender: url,
+            ..Sources::default()
+        });
+        assert_eq!(web.blender_latest().unwrap(), "5.2.3");
     }
 }

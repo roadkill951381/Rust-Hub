@@ -97,7 +97,10 @@ missing engine says how to set it up.
 
 The hub can also generate with your own [ComfyUI](https://github.com/comfyanonymous/ComfyUI),
 starting it if it isn't running (it looks in `C:\ComfyUI` and `~/ComfyUI`, or
-set `HUB_COMFY_DIR`), and unloading its models afterwards so the GPU is free.
+set `HUB_COMFY_DIR`). A ComfyUI the hub started is stopped again after the job,
+so the GPU and memory are free; one you started yourself is only asked to
+unload its models. The hub's ComfyUI writes to `comfyui.log` in the
+`rust-hub/comfyui` temp folder.
 
 | Ask for | What happens |
 |---|---|
@@ -121,7 +124,7 @@ that only saves images makes pictures.
 | `HUB_COMFY_DIR` | found automatically | ComfyUI folder, so the hub can start it |
 | `HUB_COMFY_WORKFLOWS` | `~/RustHub/comfyui` | Your exported workflows |
 | `HUB_COMFY_PICTURE_WORKFLOW` / `HUB_COMFY_MODEL_WORKFLOW` | `flux-schnell` / `hunyuan3d-2.1` | Defaults for `comfyui` |
-| `HUB_COMFY_KEEP_LOADED` | off | Keep ComfyUI's models on the GPU after a job |
+| `HUB_COMFY_KEEP_LOADED` | off | Keep ComfyUI running with its models loaded after a job |
 | `HUB_IMAGE_MODEL` / `HUB_SHAPE_MODEL` | none | Defaults for every request, e.g. `HUB_IMAGE_MODEL=comfyui` |
 
 ### Keep everything up to date
@@ -139,7 +142,7 @@ update runs in a window of its own so you can watch it.
 | ComfyUI | its latest GitHub release | the portable build's own updater, or `git pull` (close ComfyUI first) |
 | ComfyUI custom nodes | their git remotes | `git pull`; nodes not installed from git are listed but not checked |
 | ComfyUI model files the built-in workflows load | present or missing | download into the right `models` folder |
-| Blender | download.blender.org | `winget upgrade`, or blender.org |
+| Blender | its release tags on projects.blender.org | `winget upgrade`, or blender.org |
 | uv, Rust, NVIDIA driver | uv's releases, `rustup check` | `uv self update`, `rustup update`; the driver through the NVIDIA app |
 
 "Held back" means a newer version exists but Rust-Hub pins the one it was

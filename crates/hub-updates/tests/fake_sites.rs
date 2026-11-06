@@ -16,7 +16,10 @@ fn serve(routes: Vec<(&'static str, Value)>) -> String {
                 Some((_, body)) => tiny_http::Response::from_string(body.to_string()),
                 None => tiny_http::Response::from_string("{}").with_status_code(404),
             };
-            let _ = request.respond(response);
+            // One request per connection: the check's threads must never
+            // queue behind another thread's idle keep-alive connection.
+            let close = "Connection: close".parse::<tiny_http::Header>().unwrap();
+            let _ = request.respond(response.with_header(close));
         }
     });
     url
