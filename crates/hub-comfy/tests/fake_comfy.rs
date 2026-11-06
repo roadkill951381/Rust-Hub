@@ -229,7 +229,9 @@ fn a_picture_alone_feeds_the_model_workflow() {
     let comfy = client(&fake, dir.path().join("cache"));
     let picture = dir.path().join("owl.png");
     std::fs::write(&picture, b"\x89PNG fake").unwrap();
-    let (path, workflow) = comfy.make_picture("x", None, 1, None, &|_, _| {}).unwrap();
+    let (path, workflow) = comfy
+        .make_picture("x", None, None, 1, None, &|_, _| {})
+        .unwrap();
     assert!(path.is_file());
     assert_eq!(workflow, "flux-schnell");
 

@@ -294,6 +294,22 @@ impl Rigger for Blender {
         serde_json::from_value(serde_json::Value::Object(report.rest))
             .map_err(|e| format!("unreadable rig report from Blender: {e}"))
     }
+    fn pose_views(&self, reference: &Path, sheet: bool, output: &Path) -> Result<(), String> {
+        let output = std::path::absolute(output)
+            .map_err(|e| format!("could not resolve {}: {e}", output.display()))?;
+        // The sizes FLUX draws characters at; the picture workflow scales
+        // the guide to its own size anyway.
+        let (width, height) = if sheet { (1536, 768) } else { (832, 1216) };
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        self.run(
+            dir.path(),
+            "pose_views",
+            Input::File(reference),
+            Some(&output),
+            &json!({"sheet": sheet, "width": width, "height": height}),
+        )?;
+        Ok(())
+    }
 }
 
 /// A [`Blender`] found on first use, so front ends can start instantly and a
@@ -331,6 +347,10 @@ impl Rigger for LazyBlender {
 
     fn rig(&self, request: &RigRequest) -> Result<RigReport, String> {
         self.get()?.rig(request)
+    }
+
+    fn pose_views(&self, reference: &Path, sheet: bool, output: &Path) -> Result<(), String> {
+        self.get()?.pose_views(reference, sheet, output)
     }
 }
 

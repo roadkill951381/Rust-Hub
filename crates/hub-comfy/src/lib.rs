@@ -22,9 +22,25 @@ use hub_core::engine::{GenerateRequest, Generated, GenerationInfo, Generator, Pr
 use serde_json::{Value, json};
 
 pub use workflows::{
-    FLUX_DEV, FLUX_DEV_SHEET, FLUX_PULID, FLUX_PULID_SHEET, FLUX_SCHNELL, HUNYUAN3D_21,
-    MODEL_FILES, Makes, ModelFile, Workflow,
+    FLUX_DEV, FLUX_DEV_SHEET, FLUX_PULID, FLUX_PULID_SHEET, FLUX_SCHNELL, HUNYUAN3D_21, Inputs,
+    MODEL_FILES, Makes, ModelFile, POSE_DENOISE, Workflow,
 };
+
+/// Extra ComfyUI flags for jobs that keep a face: PuLID with FLUX fills a
+/// 12 GB card, and making room for the VAE by partly unloading the patched
+/// model can crash ComfyUI, so the VAE decodes on the CPU instead.
+const FACE_LAUNCH_ARGS: &[&str] = &["--cpu-vae"];
+
+/// What a workflow run gets: the prompt, the pictures to upload, the seed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunInputs<'a> {
+    pub prompt: Option<&'a str>,
+    /// Uploaded for `{{image}}`: the picture to model, or the face to keep.
+    pub image: Option<&'a Path>,
+    /// Uploaded for `{{pose}}`: the pose guide to draw over.
+    pub pose: Option<&'a Path>,
+    pub seed: u64,
+}
 
 /// Where ComfyUI listens unless `HUB_COMFY_URL` says otherwise.
 pub const DEFAULT_URL: &str = "http://127.0.0.1:8188";
@@ -239,6 +255,17 @@ impl ComfyUi {
 
     /// Makes sure ComfyUI is up, starting it from its folder if needed.
     pub fn ensure_running(&self, progress: Progress<'_>) -> Result<(), String> {
+        self.ensure_running_with(&[], progress)
+    }
+
+    /// [`ensure_running`](Self::ensure_running), passing `extra` flags when
+    /// it has to start ComfyUI. A ComfyUI that is already running keeps its
+    /// own flags.
+    pub fn ensure_running_with(
+        &self,
+        extra: &[&str],
+        progress: Progress<'_>,
+    ) -> Result<(), String> {
         if self.is_running() {
             return Ok(());
         }
@@ -258,7 +285,7 @@ impl ComfyUi {
         })?;
         progress(0.0, "starting ComfyUI");
         tracing::info!(program = %launch.program.display(), "starting ComfyUI");
-        let mut child = launch.spawn(&self.cache)?;
+        let mut child = launch.spawn(&self.cache, extra)?;
         let started = Instant::now();
         loop {
             if self.is_running() {
@@ -335,23 +362,41 @@ impl ComfyUi {
 
     /// Makes a picture of `prompt` with the picture workflow (or `workflow`)
     /// and returns where it was saved and the workflow's name. `face` is
-    /// uploaded for workflows that keep a likeness (`{{image}}`).
+    /// uploaded for workflows that keep a likeness (`{{image}}`); with a
+    /// `pose` guide, built-in FLUX workflows draw over it (see
+    /// [`Workflow::posed`]).
     pub fn make_picture(
         &self,
         prompt: &str,
         face: Option<&Path>,
+        pose: Option<&Path>,
         seed: u64,
         workflow: Option<&str>,
         progress: Progress<'_>,
     ) -> Result<(PathBuf, String), String> {
-        self.ensure_running(progress)?;
+        let extra = if face.is_some() {
+            FACE_LAUNCH_ARGS
+        } else {
+            &[]
+        };
+        self.ensure_running_with(extra, progress)?;
         let name = workflow.unwrap_or(&self.config.picture_workflow);
-        let workflow = self.workflow(name)?;
+        let mut workflow = self.workflow(name)?;
+        if pose.is_some() {
+            if let Some(posed) = workflow.posed() {
+                workflow = posed;
+            } else {
+                tracing::warn!(workflow = name, "this workflow can't follow a pose guide");
+            }
+        }
         let saved = self.run(
             &workflow,
-            Some(prompt),
-            face,
-            seed,
+            &RunInputs {
+                prompt: Some(prompt),
+                image: face,
+                pose,
+                seed,
+            },
             "making the picture in ComfyUI",
             progress,
         )?;
@@ -370,17 +415,22 @@ impl ComfyUi {
     pub fn run(
         &self,
         workflow: &Workflow,
-        prompt: Option<&str>,
-        picture: Option<&Path>,
-        seed: u64,
+        inputs: &RunInputs<'_>,
         stage: &str,
         progress: Progress<'_>,
     ) -> Result<Saved, String> {
-        let image = match picture {
-            Some(path) if workflow.uses("{{image}}") => Some(self.upload(path)?),
-            _ => None,
+        let upload = |picture: Option<&Path>, placeholder: &str| match picture {
+            Some(path) if workflow.uses(placeholder) => self.upload(path).map(Some),
+            _ => Ok(None),
         };
-        let graph = workflow.fill(prompt, image.as_deref(), seed)?;
+        let image = upload(inputs.image, "{{image}}")?;
+        let pose = upload(inputs.pose, "{{pose}}")?;
+        let graph = workflow.fill(&Inputs {
+            prompt: inputs.prompt,
+            image: image.as_deref(),
+            pose: pose.as_deref(),
+            seed: inputs.seed,
+        })?;
         let id = self.queue(&graph, &workflow.name)?;
         tracing::info!(%id, workflow = %workflow.name, "ComfyUI job queued");
         let started = Instant::now();
@@ -594,6 +644,7 @@ impl Generator for ComfyUi {
             let (path, name) = self.make_picture(
                 prompt,
                 request.face.as_deref(),
+                request.pose.as_deref(),
                 seed,
                 picture_workflow,
                 &half,
@@ -604,9 +655,12 @@ impl Generator for ComfyUi {
         let rest = |f: f32, s: &str| progress(0.4 + f * 0.6, s);
         let saved = self.run(
             &model_workflow,
-            prompt,
-            picture.as_deref(),
-            seed,
+            &RunInputs {
+                prompt,
+                image: picture.as_deref(),
+                pose: None,
+                seed,
+            },
             "making the 3D model in ComfyUI",
             &rest,
         );
@@ -796,7 +850,7 @@ impl Launch {
         None
     }
 
-    fn spawn(&self, log_dir: &Path) -> Result<std::process::Child, String> {
+    fn spawn(&self, log_dir: &Path, extra: &[&str]) -> Result<std::process::Child, String> {
         std::fs::create_dir_all(log_dir)
             .map_err(|e| format!("could not create {}: {e}", log_dir.display()))?;
         let log = std::fs::File::create(log_dir.join("comfyui.log"))
@@ -807,6 +861,7 @@ impl Launch {
         // hub's output would otherwise stay open until ComfyUI exits.
         command
             .args(&self.args)
+            .args(extra)
             .current_dir(&self.cwd)
             .stdin(Stdio::null())
             .stdout(log)

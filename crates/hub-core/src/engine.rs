@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use schemars::JsonSchema;
@@ -93,6 +93,11 @@ pub struct GenerateRequest {
     /// from all three views (Hunyuan3D-2mv): truer backs and profiles.
     #[serde(default)]
     pub multiview: bool,
+    /// A plain grey figure (or turnaround sheet of one) whose pose and
+    /// framing the picture follows, rendered by [`Rigger::pose_views`] from
+    /// the character being rigged against. Only ComfyUI's pictures use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pose: Option<PathBuf>,
 }
 
 /// Where a generated model came from, stored with it in the library.
@@ -196,6 +201,12 @@ pub trait Rigger: Send + Sync + fmt::Debug {
     /// Writes `request.output`: the reference character with its meshes
     /// swapped for the model, skinned to the same skeleton. Blocks until done.
     fn rig(&self, request: &RigRequest) -> Result<RigReport, String>;
+
+    /// Renders `reference` in its rest pose as a plain grey figure on a light
+    /// grey background into `output` (PNG): one front view, or with `sheet`
+    /// a turnaround of front, side (facing left) and back. Picture models use
+    /// it as a pose guide, so a new character stands like the rig.
+    fn pose_views(&self, reference: &Path, sheet: bool, output: &Path) -> Result<(), String>;
 }
 
 /// The engines available to a session. Cheap to clone.

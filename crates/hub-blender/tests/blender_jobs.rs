@@ -160,4 +160,12 @@ fn a_generated_model_is_rigged_like_the_reference() {
     let primitives = after["meshes"][0]["primitives"].as_array().unwrap();
     assert_eq!(primitives.len(), 2, "skin and clothes");
     assert!(primitives[0]["attributes"].get("JOINTS_0").is_some());
+
+    // The reference as a pose guide: a PNG turnaround at the sheet's size.
+    let sheet = dir.path().join("pose.png");
+    blender.pose_views(&reference, true, &sheet).unwrap();
+    let png = std::fs::read(&sheet).unwrap();
+    assert_eq!(&png[1..4], b"PNG");
+    let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+    assert_eq!((size(16), size(20)), (1536, 768));
 }

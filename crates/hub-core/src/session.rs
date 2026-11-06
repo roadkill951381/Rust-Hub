@@ -436,6 +436,7 @@ impl Session {
                         faces,
                         face,
                         multiview,
+                        pose: None,
                     },
                     name,
                     size_mm,
@@ -614,6 +615,13 @@ impl Job {
                 rig,
             } => {
                 let share = if rig.is_some() { 0.9 } else { 1.0 };
+                let mut request = request;
+                if let Some((reference, _)) = &rig
+                    && request.image.is_none()
+                {
+                    progress(0.0, "drawing the pose guide in Blender");
+                    request.pose = Some(pose_guide(&self.engines, reference, request.multiview)?);
+                }
                 let mut generated = generator(&self.engines)?
                     .generate(&request, &|f, s| progress(f * share, s))
                     .map_err(Error::Engine)?;
@@ -738,6 +746,29 @@ fn file_name(path: &std::path::Path) -> String {
         || path.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     )
+}
+
+/// Renders the reference character as the pose guide for a new picture, into
+/// the temp folder (one file per reference and layout, replaced each time).
+fn pose_guide(
+    engines: &Engines,
+    reference: &std::path::Path,
+    sheet: bool,
+) -> Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join("rust-hub").join("pose");
+    std::fs::create_dir_all(&dir).map_err(|source| Error::Write {
+        path: dir.clone(),
+        source,
+    })?;
+    let stem = reference
+        .file_stem()
+        .map_or_else(|| "reference".into(), |s| s.to_string_lossy().into_owned());
+    let layout = if sheet { "sheet" } else { "front" };
+    let output = dir.join(format!("{stem}-{layout}.png"));
+    rigger(engines)?
+        .pose_views(reference, sheet, &output)
+        .map_err(Error::Engine)?;
+    Ok(output)
 }
 
 /// e.g. "38,748 triangles on 52 bones, materials `surv_mei.body` (31% skin) and
@@ -1620,7 +1651,8 @@ mod tests {
                     seed: request.seed.unwrap_or(7),
                     textured: request.texture,
                     seconds: 1.0,
-                    image: None,
+                    // Stands in for the picture the shape was made from.
+                    image: request.pose.clone(),
                     face: request.face.clone(),
                     ..crate::engine::GenerationInfo::default()
                 },
@@ -1717,6 +1749,15 @@ mod tests {
             "fake".into()
         }
 
+        fn pose_views(
+            &self,
+            _reference: &std::path::Path,
+            sheet: bool,
+            output: &std::path::Path,
+        ) -> std::result::Result<(), String> {
+            std::fs::write(output, if sheet { "sheet" } else { "front" }).map_err(|e| e.to_string())
+        }
+
         fn rig(
             &self,
             request: &crate::engine::RigRequest,
@@ -1781,6 +1822,8 @@ mod tests {
         let info = out.generation.unwrap();
         assert_eq!(info.face.as_deref(), Some(face.as_path()));
         assert!(info.textured, "rigged characters are always textured");
+        let pose = info.image.as_deref().expect("a pose guide was drawn");
+        assert_eq!(std::fs::read_to_string(pose).unwrap(), "sheet");
         let rig = info.rig.unwrap();
         assert_eq!(rig.materials, ["surv_mei.body"]);
         assert!(dir.path().join("out-rigged.glb").exists());

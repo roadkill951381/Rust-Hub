@@ -113,9 +113,14 @@ impl Generator for Generators {
             .ok_or("give a prompt for ComfyUI to draw, or a picture")?;
         let seed = request.seed.unwrap_or_else(hub_comfy::random_seed);
         let first = |f: f32, s: &str| progress(f * 0.3, s);
-        let (picture, name) =
-            self.comfy
-                .make_picture(&prompt, request.face.as_deref(), seed, workflow, &first)?;
+        let (picture, name) = self.comfy.make_picture(
+            &prompt,
+            request.face.as_deref(),
+            request.pose.as_deref(),
+            seed,
+            workflow,
+            &first,
+        )?;
         if self.comfy.config().free_after {
             progress(0.3, "freeing ComfyUI's memory");
             self.comfy.release();

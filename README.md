@@ -117,8 +117,10 @@ unload its models. The hub's ComfyUI writes to `comfyui.log` in the
 Built-in workflows: `flux-schnell` and `flux-dev` (FLUX GGUF through
 ComfyUI-GGUF, with `t5xxl_fp8_e4m3fn`, `clip_l` and `ae`), `flux-dev-sheet`
 (a front, side and back turnaround), `flux-pulid` and `flux-pulid-sheet`
-(keep a face; need the ComfyUI_PuLID_Flux_ll nodes, `flux1-dev-Q5_K_S.gguf`
-and `pulid_flux_v0.9.1.safetensors` in `models/pulid`), and `hunyuan3d-2.1`
+(keep a face; need the ComfyUI_PuLID_Flux_ll nodes with `insightface`,
+`facexlib`, `onnxruntime-gpu` and `facenet-pytorch --no-deps` in ComfyUI's
+Python, plus `flux1-dev-Q5_K_S.gguf` and `pulid_flux_v0.9.1.safetensors` in
+`models/pulid`), and `hunyuan3d-2.1`
 (needs `hunyuan_3d_v2.1.safetensors` in `models/checkpoints`; ComfyUI's "Image
 to Model (Hunyuan3D 2.1)" template offers the download). To use your own, open
 it in ComfyUI, choose Workflow > Export (API), and save it as
@@ -147,8 +149,10 @@ hub generate "Mei, a young woman survivor, red jacket, cargo trousers, boots" \
     --materials surv_mei --faces 20000 -o mei.glb
 ```
 
-1. FLUX with PuLID in ComfyUI draws a turnaround sheet (front, side, back,
-   A-pose) that keeps the portrait's face. `--face` alone draws one view.
+1. Blender renders the reference character in its rest pose as a plain grey
+   figure from the front, side and back. FLUX with PuLID in ComfyUI paints
+   over that guide, so the new character stands exactly like the rig, and
+   keeps the portrait's face. Without `--multiview` it draws one front view.
 2. hub-gen cuts the sheet into views, builds the shape from all of them with
    Hunyuan3D-2mv and paints it with Hunyuan3D-Paint.
 3. Blender fits the model to the reference character (height, facing, arm
@@ -261,6 +265,11 @@ Design rules:
   the scene does not load textures yet (phase 3), so exports from the scene
   are untextured.
 - Hollowing does not punch drain holes yet; add them in your slicer.
+- Face jobs fill a 12 GB card, so a ComfyUI the hub starts for one runs with
+  `--cpu-vae`; one you started yourself keeps its own flags. With ComfyUI
+  0.42 or newer, ComfyUI_PuLID_Flux_ll (commit 7c7362b) needs
+  `timestep_zero_index=None,` added to `pulid_forward_orig` in
+  `PulidFluxHook.py` until upstream fixes it.
 - The GPU model adapters follow the upstream projects' own code but have only
   been run here through the demo models; first runs on a real GPU may need
   small fixes.

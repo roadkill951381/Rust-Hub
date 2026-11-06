@@ -153,24 +153,7 @@ def rig(job):
 
     params = job.get("params", {})
     reference = params["reference"]
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.import_scene.gltf(filepath=reference)
-    scene = bpy.context.scene
-    armatures = [o for o in scene.objects if o.type == "ARMATURE"]
-    if len(armatures) != 1:
-        raise ValueError(
-            f"the reference must have exactly one skeleton; {reference} has {len(armatures)}"
-        )
-    arm = armatures[0]
-    skinned = [
-        o
-        for o in scene.objects
-        if o.type == "MESH" and any(m.type == "ARMATURE" and m.object == arm for m in o.modifiers)
-    ]
-    if not skinned:
-        raise ValueError(f"{reference} has no meshes skinned to its skeleton")
-    for pb in arm.pose.bones:
-        pb.matrix_basis = Matrix.Identity(4)
+    arm, skinned = load_reference(reference)
     prefix = params.get("materials") or body_prefix(skinned) or arm.name
 
     before = set(bpy.data.objects)
@@ -237,6 +220,128 @@ def rig(job):
     report["bones"] = len(arm.data.bones)
     report["triangles"] = triangles(model)
     return report
+
+
+def load_reference(reference):
+    """Imports a rigged character into an empty scene and returns its one
+    skeleton, in its rest pose, and the meshes skinned to it."""
+    from mathutils import Matrix
+
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.import_scene.gltf(filepath=reference)
+    scene = bpy.context.scene
+    armatures = [o for o in scene.objects if o.type == "ARMATURE"]
+    if len(armatures) != 1:
+        raise ValueError(
+            f"the reference must have exactly one skeleton; {reference} has {len(armatures)}"
+        )
+    arm = armatures[0]
+    skinned = [
+        o
+        for o in scene.objects
+        if o.type == "MESH" and any(m.type == "ARMATURE" and m.object == arm for m in o.modifiers)
+    ]
+    if not skinned:
+        raise ValueError(f"{reference} has no meshes skinned to its skeleton")
+    for pb in arm.pose.bones:
+        pb.matrix_basis = Matrix.Identity(4)
+    bpy.context.view_layer.update()
+    return arm, skinned
+
+
+# Turns about the vertical for each view, with the camera in front: the front,
+# the side with the figure facing screen-left, and the back. The order and
+# facing are what hub-gen's sheet splitter and Hunyuan3D-2mv expect.
+SHEET_TURNS = (0.0, -math.pi / 2, math.pi)
+
+
+def pose_views(job):
+    """Renders a rigged character in its rest pose as a plain grey figure on
+    a light grey background: one front view, or a turnaround sheet (front,
+    side, back) with gaps between the figures. A picture model follows it as
+    a pose guide, so the character it draws stands like the rig."""
+    import numpy as np
+    from mathutils import Matrix
+
+    params = job.get("params", {})
+    width, height = int(params.get("width", 832)), int(params.get("height", 1216))
+    turns = SHEET_TURNS if params.get("sheet") else SHEET_TURNS[:1]
+    arm, skinned = load_reference(job["input"])
+    figure = evaluated_copy(skinned, arm)
+    figure.vertex_groups.clear()
+    for o in list(bpy.context.scene.objects):
+        if o != figure:
+            bpy.data.objects.remove(o, do_unlink=True)
+
+    clay = bpy.data.materials.new("clay")
+    clay.diffuse_color = (0.3, 0.3, 0.3, 1.0)
+    clay.use_nodes = True
+    bsdf = clay.node_tree.nodes["Principled BSDF"]
+    bsdf.inputs["Base Color"].default_value = (0.3, 0.3, 0.3, 1.0)
+    bsdf.inputs["Roughness"].default_value = 0.8
+    figure.data.materials.clear()
+    figure.data.materials.append(clay)
+    for poly in figure.data.polygons:
+        poly.material_index = 0
+
+    pts = mesh_points(figure)
+    lo, hi = pts.min(0), pts.max(0)
+    tall = float(hi[2] - lo[2])
+    centre = Matrix.Translation((-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]))
+    figure.data.transform(centre)
+    gap = 0.12 * tall
+    x = 0.0
+    figures = []
+    for k, turn in enumerate(turns):
+        obj = figure if k == 0 else figure.copy()
+        if k:
+            obj.data = figure.data.copy()
+            bpy.context.scene.collection.objects.link(obj)
+        figures.append((obj, turn))
+    for obj, turn in figures:
+        obj.data.transform(Matrix.Rotation(turn, 4, "Z"))
+    for obj, _turn in figures:
+        p = mesh_points(obj)
+        left, right = float(p[:, 0].min()), float(p[:, 0].max())
+        obj.data.transform(Matrix.Translation((x - left, 0.0, 0.0)))
+        x += right - left + gap
+    span = x - gap
+
+    scene = bpy.context.scene
+    camera = bpy.data.objects.new("camera", bpy.data.cameras.new("camera"))
+    scene.collection.objects.link(camera)
+    camera.data.type = "ORTHO"
+    aspect = width / height
+    view_h = max(tall * 1.2, span * 1.1 / aspect)
+    camera.data.ortho_scale = view_h * aspect if aspect >= 1 else view_h
+    camera.location = (span / 2, -10.0, tall / 2)
+    camera.rotation_euler = (math.pi / 2, 0.0, 0.0)
+    camera.data.clip_end = 100.0
+    scene.camera = camera
+
+    sun = bpy.data.objects.new("sun", bpy.data.lights.new("sun", "SUN"))
+    sun.data.energy = 2.5
+    sun.rotation_euler = (math.radians(50), 0.0, math.radians(-30))
+    scene.collection.objects.link(sun)
+    world = bpy.data.worlds.new("world")
+    world.use_nodes = True
+    world.node_tree.nodes["Background"].inputs["Color"].default_value = (0.8, 0.8, 0.8, 1.0)
+    world.node_tree.nodes["Background"].inputs["Strength"].default_value = 1.0
+    scene.world = world
+
+    scene.render.engine = "CYCLES"
+    scene.cycles.device = "CPU"
+    scene.cycles.samples = int(params.get("samples", 16))
+    scene.cycles.use_denoising = False
+    scene.view_settings.view_transform = "Standard"
+    scene.render.resolution_x, scene.render.resolution_y = width, height
+    scene.render.resolution_percentage = 100
+    scene.render.image_settings.file_format = "PNG"
+    scene.render.image_settings.color_mode = "RGB"
+    scene.render.filepath = job["output"]
+    bpy.ops.render.render(write_still=True)
+    del np
+    return {"width": width, "height": height, "views": len(turns)}
 
 
 def body_prefix(meshes):
@@ -1005,6 +1110,8 @@ def main():
         op = job["op"]
         if op == "rig":
             report.update(rig(job))
+        elif op == "pose_views":
+            report.update(pose_views(job))
         elif op != "version":
             if op not in OPS:
                 raise ValueError(f"unknown operation {op!r}")
