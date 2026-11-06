@@ -255,11 +255,26 @@ def load_reference(reference):
 SHEET_TURNS = (0.0, -math.pi / 2, math.pi)
 
 
+def clay_figure(figure):
+    """One plain grey material for the whole figure."""
+    clay = bpy.data.materials.new("clay")
+    clay.diffuse_color = (0.4, 0.4, 0.4, 1.0)
+    clay.use_nodes = True
+    bsdf = clay.node_tree.nodes["Principled BSDF"]
+    bsdf.inputs["Base Color"].default_value = (0.4, 0.4, 0.4, 1.0)
+    bsdf.inputs["Roughness"].default_value = 0.8
+    figure.data.materials.clear()
+    figure.data.materials.append(clay)
+    for poly in figure.data.polygons:
+        poly.material_index = 0
+
+
 def pose_views(job):
-    """Renders a rigged character in its rest pose as a plain grey figure on
-    a light grey background: one front view, or a turnaround sheet (front,
-    side, back) with gaps between the figures. A picture model follows it as
-    a pose guide, so the character it draws stands like the rig."""
+    """Renders a rigged character in its rest pose on a light grey
+    background, as a plain grey figure or (``textured``) with its own
+    materials: one front view, or a turnaround sheet (front, side, back) with
+    gaps between the figures. A picture model follows it as a pose guide, so
+    the character it draws stands like the rig."""
     import numpy as np
     from mathutils import Matrix
 
@@ -272,17 +287,8 @@ def pose_views(job):
     for o in list(bpy.context.scene.objects):
         if o != figure:
             bpy.data.objects.remove(o, do_unlink=True)
-
-    clay = bpy.data.materials.new("clay")
-    clay.diffuse_color = (0.3, 0.3, 0.3, 1.0)
-    clay.use_nodes = True
-    bsdf = clay.node_tree.nodes["Principled BSDF"]
-    bsdf.inputs["Base Color"].default_value = (0.3, 0.3, 0.3, 1.0)
-    bsdf.inputs["Roughness"].default_value = 0.8
-    figure.data.materials.clear()
-    figure.data.materials.append(clay)
-    for poly in figure.data.polygons:
-        poly.material_index = 0
+    if not params.get("textured"):
+        clay_figure(figure)
 
     pts = mesh_points(figure)
     lo, hi = pts.min(0), pts.max(0)
@@ -320,13 +326,25 @@ def pose_views(job):
     scene.camera = camera
 
     sun = bpy.data.objects.new("sun", bpy.data.lights.new("sun", "SUN"))
-    sun.data.energy = 2.5
+    sun.data.energy = 2.0
     sun.rotation_euler = (math.radians(50), 0.0, math.radians(-30))
     scene.collection.objects.link(sun)
+    # A light grey backdrop that lights the figure only softly, so its own
+    # colours are not washed out.
     world = bpy.data.worlds.new("world")
     world.use_nodes = True
-    world.node_tree.nodes["Background"].inputs["Color"].default_value = (0.8, 0.8, 0.8, 1.0)
-    world.node_tree.nodes["Background"].inputs["Strength"].default_value = 1.0
+    nodes, links = world.node_tree.nodes, world.node_tree.links
+    seen = nodes["Background"]
+    seen.inputs["Color"].default_value = (0.8, 0.8, 0.8, 1.0)
+    lit = nodes.new("ShaderNodeBackground")
+    lit.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    lit.inputs["Strength"].default_value = 0.35
+    path = nodes.new("ShaderNodeLightPath")
+    mix = nodes.new("ShaderNodeMixShader")
+    links.new(path.outputs["Is Camera Ray"], mix.inputs["Fac"])
+    links.new(lit.outputs["Background"], mix.inputs[1])
+    links.new(seen.outputs["Background"], mix.inputs[2])
+    links.new(mix.outputs["Shader"], nodes["World Output"].inputs["Surface"])
     scene.world = world
 
     scene.render.engine = "CYCLES"

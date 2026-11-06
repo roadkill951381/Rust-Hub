@@ -161,6 +161,11 @@ hub generate "Mei, a young woman survivor, red jacket, cargo trousers, boots" \
    Skin is split from clothes by colour into `<materials>.body` and
    `<materials>.clothes`.
 
+To remake a character you already have, add `--keep-look`: the guide is the
+reference with its own colours and clothes, and the picture repaints less of
+it (0.7 instead of 0.88; set `--repaint` to choose), so the arms and outfit
+stay where they are while the portrait sets the face.
+
 `hub rig model.glb --like character.glb -o rigged.glb` runs step 3 alone on a
 model you already have. In the app these options are under Generate >
 Character; Claude has them on the `generate` and `rig` tools.

@@ -163,7 +163,10 @@ fn a_generated_model_is_rigged_like_the_reference() {
 
     // The reference as a pose guide: a PNG turnaround at the sheet's size.
     let sheet = dir.path().join("pose.png");
-    blender.pose_views(&reference, true, &sheet).unwrap();
+    blender.pose_views(&reference, true, false, &sheet).unwrap();
+    let front = dir.path().join("front.png");
+    blender.pose_views(&reference, false, true, &front).unwrap();
+    assert!(front.is_file());
     let png = std::fs::read(&sheet).unwrap();
     assert_eq!(&png[1..4], b"PNG");
     let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());

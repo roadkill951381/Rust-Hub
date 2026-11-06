@@ -51,9 +51,9 @@ const SHEET_STYLE: &str = "character turnaround reference sheet, the same charac
                            three times side by side, evenly spaced and not overlapping: \
                            front view, side view facing left, back view";
 
-/// How much of a pose guide a picture repaints: enough to turn a grey
-/// mannequin into a dressed person in colour (0.82 left the clothes grey),
-/// little enough to keep its pose and place.
+/// How much of a pose guide a picture repaints unless told otherwise: enough
+/// to turn a grey mannequin into a dressed person in colour (0.82 left the
+/// clothes grey), little enough to keep its place on the sheet.
 pub const POSE_DENOISE: f32 = 0.88;
 
 /// What a workflow makes.
@@ -154,10 +154,10 @@ impl Workflow {
 
     /// The same picture drawn over a pose guide: the built-in FLUX workflows
     /// start from the guide (`{{pose}}`, scaled to the picture's size)
-    /// instead of noise and repaint [`POSE_DENOISE`] of it. A workflow that
+    /// instead of noise and repaint `repaint` (0 to 1) of it. A workflow that
     /// already takes `{{pose}}` is kept; `None` for one that can't be changed
     /// (a person's own, or one that isn't FLUX).
-    pub fn posed(&self) -> Option<Self> {
+    pub fn posed(&self, repaint: f32) -> Option<Self> {
         if self.uses("{{pose}}") {
             return Some(self.clone());
         }
@@ -191,7 +191,7 @@ impl Workflow {
             json!({"class_type": "VAEEncode", "inputs": {"pixels": ["31", 0], "vae": ["3", 0]}}),
         );
         graph["7"]["inputs"]["latent_image"] = json!(["32", 0]);
-        graph["7"]["inputs"]["denoise"] = json!(POSE_DENOISE);
+        graph["7"]["inputs"]["denoise"] = json!(repaint.clamp(0.0, 1.0));
         Some(Self {
             name: self.name.clone(),
             graph,
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn pictures_can_be_drawn_over_a_pose_guide() {
         let sheet = Workflow::load(FLUX_PULID_SHEET, None).unwrap();
-        let posed = sheet.posed().unwrap();
+        let posed = sheet.posed(POSE_DENOISE).unwrap();
         assert!(posed.uses("{{pose}}") && posed.uses("{{image}}"));
         let err = posed
             .fill(&inputs(Some("Mei"), Some("mei.png"), 1))
@@ -626,7 +626,7 @@ mod tests {
         assert_eq!(g["7"]["inputs"]["latent_image"], json!(["32", 0]));
         assert_eq!(g["7"]["inputs"]["denoise"], json!(POSE_DENOISE));
         assert_eq!(
-            posed.posed(),
+            posed.posed(POSE_DENOISE),
             Some(posed.clone()),
             "posing twice changes nothing"
         );
@@ -634,7 +634,7 @@ mod tests {
         assert!(
             Workflow::load(HUNYUAN3D_21, None)
                 .unwrap()
-                .posed()
+                .posed(POSE_DENOISE)
                 .is_none()
         );
         let mine = Workflow {
@@ -642,7 +642,7 @@ mod tests {
             ..Workflow::load(FLUX_DEV, None).unwrap()
         };
         assert!(
-            mine.posed().is_none(),
+            mine.posed(POSE_DENOISE).is_none(),
             "a person's own workflow is left alone"
         );
     }

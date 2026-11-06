@@ -31,6 +31,13 @@ pub use workflows::{
 /// model can crash ComfyUI, so the VAE decodes on the CPU instead.
 const FACE_LAUNCH_ARGS: &[&str] = &["--cpu-vae"];
 
+/// A pose guide for a picture: drawn over, repainting `repaint` (0 to 1) of it.
+#[derive(Debug, Clone, Copy)]
+pub struct Pose<'a> {
+    pub guide: &'a Path,
+    pub repaint: f32,
+}
+
 /// What a workflow run gets: the prompt, the pictures to upload, the seed.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunInputs<'a> {
@@ -369,7 +376,7 @@ impl ComfyUi {
         &self,
         prompt: &str,
         face: Option<&Path>,
-        pose: Option<&Path>,
+        pose: Option<Pose<'_>>,
         seed: u64,
         workflow: Option<&str>,
         progress: Progress<'_>,
@@ -382,8 +389,8 @@ impl ComfyUi {
         self.ensure_running_with(extra, progress)?;
         let name = workflow.unwrap_or(&self.config.picture_workflow);
         let mut workflow = self.workflow(name)?;
-        if pose.is_some() {
-            if let Some(posed) = workflow.posed() {
+        if let Some(pose) = pose {
+            if let Some(posed) = workflow.posed(pose.repaint) {
                 workflow = posed;
             } else {
                 tracing::warn!(workflow = name, "this workflow can't follow a pose guide");
@@ -394,7 +401,7 @@ impl ComfyUi {
             &RunInputs {
                 prompt: Some(prompt),
                 image: face,
-                pose,
+                pose: pose.map(|p| p.guide),
                 seed,
             },
             "making the picture in ComfyUI",
@@ -582,6 +589,14 @@ impl ComfyUi {
     }
 }
 
+/// The request's pose guide, with its repaint share or the default.
+pub fn pose_of(request: &GenerateRequest) -> Option<Pose<'_>> {
+    request.pose.as_deref().map(|guide| Pose {
+        guide,
+        repaint: request.repaint.unwrap_or(POSE_DENOISE),
+    })
+}
+
 /// `comfyui` or `comfyui:<workflow>`: whether `model` names ComfyUI, and the
 /// workflow if one is named.
 pub fn parse_engine(model: &str) -> Option<Option<&str>> {
@@ -644,7 +659,7 @@ impl Generator for ComfyUi {
             let (path, name) = self.make_picture(
                 prompt,
                 request.face.as_deref(),
-                request.pose.as_deref(),
+                pose_of(request),
                 seed,
                 picture_workflow,
                 &half,

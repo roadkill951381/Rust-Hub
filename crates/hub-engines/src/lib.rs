@@ -116,7 +116,7 @@ impl Generator for Generators {
         let (picture, name) = self.comfy.make_picture(
             &prompt,
             request.face.as_deref(),
-            request.pose.as_deref(),
+            hub_comfy::pose_of(&request),
             seed,
             workflow,
             &first,

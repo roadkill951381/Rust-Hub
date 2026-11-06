@@ -200,6 +200,16 @@ pub enum Command {
         /// `surv_mei.body` and `surv_mei.clothes`; the reference's by default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         materials: Option<String>,
+        /// When rigging, draw over the reference as it looks (its colours and
+        /// clothes) instead of a plain grey figure: for remaking that same
+        /// character. Needs `rig_like`.
+        #[serde(default)]
+        keep_look: bool,
+        /// How much of the pose guide the picture repaints, from 0 to 1:
+        /// lower keeps more of the reference's pose (and look). 0.88 by
+        /// default, 0.7 with `keep_look`. Needs `rig_like`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repaint: Option<f32>,
     },
     /// Rig a model (.glb) like an existing rigged character (.glb) with
     /// Blender: the character's skeleton, rest pose and animations are kept

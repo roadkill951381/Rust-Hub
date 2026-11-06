@@ -400,6 +400,8 @@ impl Session {
                 multiview,
                 rig_like,
                 materials,
+                keep_look,
+                repaint,
             } => {
                 generator(&self.engines)?;
                 let prompt = prompt.filter(|p| !p.trim().is_empty());
@@ -423,6 +425,19 @@ impl Session {
                 }
                 if rig_like.is_some() {
                     rigger(&self.engines)?;
+                } else if keep_look || repaint.is_some() {
+                    return Err(Error::InvalidArgument(
+                        "keep_look and repaint are for drawing over the character in rig_like; \
+                         give rig_like too"
+                            .into(),
+                    ));
+                }
+                if let Some(r) = repaint
+                    && !(r > 0.0 && r <= 1.0)
+                {
+                    return Err(Error::InvalidArgument(format!(
+                        "repaint is a share from 0 to 1, got {r}"
+                    )));
                 }
                 Work::Generate {
                     request: GenerateRequest {
@@ -437,10 +452,12 @@ impl Session {
                         face,
                         multiview,
                         pose: None,
+                        repaint: repaint.or(keep_look.then_some(KEEP_LOOK_REPAINT)),
                     },
                     name,
                     size_mm,
                     rig: rig_like.map(|reference| (reference, materials)),
+                    keep_look,
                 }
             }
             Command::Rig {
@@ -514,6 +531,8 @@ enum Work {
         size_mm: Option<f32>,
         /// Rig the result like this character, with these material names.
         rig: Option<(PathBuf, Option<String>)>,
+        /// Draw over the reference as it looks rather than a grey figure.
+        keep_look: bool,
     },
     Rig(RigRequest),
 }
@@ -613,6 +632,7 @@ impl Job {
                 name,
                 size_mm,
                 rig,
+                keep_look,
             } => {
                 let share = if rig.is_some() { 0.9 } else { 1.0 };
                 let mut request = request;
@@ -620,7 +640,12 @@ impl Job {
                     && request.image.is_none()
                 {
                     progress(0.0, "drawing the pose guide in Blender");
-                    request.pose = Some(pose_guide(&self.engines, reference, request.multiview)?);
+                    request.pose = Some(pose_guide(
+                        &self.engines,
+                        reference,
+                        request.multiview,
+                        keep_look,
+                    )?);
                 }
                 let mut generated = generator(&self.engines)?
                     .generate(&request, &|f, s| progress(f * share, s))
@@ -748,12 +773,17 @@ fn file_name(path: &std::path::Path) -> String {
     )
 }
 
+/// How much of the reference a remake (`keep_look`) repaints by default:
+/// enough for the portrait's face, little enough to keep the arms and colours.
+const KEEP_LOOK_REPAINT: f32 = 0.7;
+
 /// Renders the reference character as the pose guide for a new picture, into
 /// the temp folder (one file per reference and layout, replaced each time).
 fn pose_guide(
     engines: &Engines,
     reference: &std::path::Path,
     sheet: bool,
+    textured: bool,
 ) -> Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join("rust-hub").join("pose");
     std::fs::create_dir_all(&dir).map_err(|source| Error::Write {
@@ -764,9 +794,10 @@ fn pose_guide(
         .file_stem()
         .map_or_else(|| "reference".into(), |s| s.to_string_lossy().into_owned());
     let layout = if sheet { "sheet" } else { "front" };
-    let output = dir.join(format!("{stem}-{layout}.png"));
+    let look = if textured { "-textured" } else { "" };
+    let output = dir.join(format!("{stem}-{layout}{look}.png"));
     rigger(engines)?
-        .pose_views(reference, sheet, &output)
+        .pose_views(reference, sheet, textured, &output)
         .map_err(Error::Engine)?;
     Ok(output)
 }
@@ -1587,6 +1618,8 @@ mod tests {
                 multiview: false,
                 rig_like: None,
                 materials: None,
+                keep_look: false,
+                repaint: None,
             })
             .unwrap_err()
             .to_string();
@@ -1695,6 +1728,8 @@ mod tests {
                 multiview: false,
                 rig_like: None,
                 materials: None,
+                keep_look: false,
+                repaint: None,
             })
             .unwrap();
         let id = out.created[0];
@@ -1753,9 +1788,15 @@ mod tests {
             &self,
             _reference: &std::path::Path,
             sheet: bool,
+            textured: bool,
             output: &std::path::Path,
         ) -> std::result::Result<(), String> {
-            std::fs::write(output, if sheet { "sheet" } else { "front" }).map_err(|e| e.to_string())
+            let text = format!(
+                "{}{}",
+                if sheet { "sheet" } else { "front" },
+                if textured { " textured" } else { "" }
+            );
+            std::fs::write(output, text).map_err(|e| e.to_string())
         }
 
         fn rig(
@@ -1791,6 +1832,8 @@ mod tests {
             multiview: true,
             rig_like: None,
             materials: Some("surv_mei".into()),
+            keep_look: false,
+            repaint: None,
         }
     }
 
@@ -1806,8 +1849,14 @@ mod tests {
             ..Engines::default()
         });
         let mut command = character(Some(face.clone()), None);
-        if let Command::Generate { rig_like, .. } = &mut command {
+        if let Command::Generate {
+            rig_like,
+            keep_look,
+            ..
+        } = &mut command
+        {
             *rig_like = Some(reference.clone());
+            *keep_look = true;
         }
         let err = s.execute(command.clone()).unwrap_err().to_string();
         assert!(err.to_lowercase().contains("blender"), "{err}");
@@ -1823,7 +1872,7 @@ mod tests {
         assert_eq!(info.face.as_deref(), Some(face.as_path()));
         assert!(info.textured, "rigged characters are always textured");
         let pose = info.image.as_deref().expect("a pose guide was drawn");
-        assert_eq!(std::fs::read_to_string(pose).unwrap(), "sheet");
+        assert_eq!(std::fs::read_to_string(pose).unwrap(), "sheet textured");
         let rig = info.rig.unwrap();
         assert_eq!(rig.materials, ["surv_mei.body"]);
         assert!(dir.path().join("out-rigged.glb").exists());

@@ -85,6 +85,8 @@ impl Default for PrintSettings {
     }
 }
 
+// A form of checkboxes: each bool is one tick box.
+#[allow(clippy::struct_excessive_bools)]
 struct GenerateForm {
     prompt: String,
     image: Option<PathBuf>,
@@ -104,6 +106,10 @@ struct GenerateForm {
     rig_like: Option<PathBuf>,
     /// Material name prefix when rigging; the reference's when empty.
     materials: String,
+    /// Draw over the reference as it looks, to remake that character.
+    keep_look: bool,
+    /// How much of the pose guide to repaint; the default when `None`.
+    repaint: Option<f32>,
 }
 
 impl Default for GenerateForm {
@@ -121,6 +127,8 @@ impl Default for GenerateForm {
             multiview: false,
             rig_like: None,
             materials: String::new(),
+            keep_look: false,
+            repaint: None,
         }
     }
 }
@@ -541,7 +549,29 @@ impl HubApp {
                              and surv_mei.clothes",
                         );
                     });
-                    ui.weak("Describe the reference's rest pose in the prompt, e.g. an A-pose.");
+                    ui.checkbox(&mut form.keep_look, "Keep its look")
+                        .on_hover_text(
+                            "Draw over the reference as it looks (its colours and clothes) instead \
+                         of a plain grey figure: for remaking the same character",
+                        );
+                    ui.horizontal(|ui| {
+                        let mut custom = form.repaint.is_some();
+                        if ui.checkbox(&mut custom, "Repaint").changed() {
+                            form.repaint = custom.then_some(0.8);
+                        }
+                        let mut share = form.repaint.unwrap_or(0.8);
+                        let slider = ui.add_enabled(
+                            custom,
+                            egui::Slider::new(&mut share, 0.3..=1.0).fixed_decimals(2),
+                        );
+                        if slider.changed() {
+                            form.repaint = Some(share);
+                        }
+                        slider.on_hover_text(
+                            "How much of the reference the picture repaints: lower keeps more \
+                             of its pose and look. Default 0.88, or 0.7 when keeping its look",
+                        );
+                    });
                 }
             });
         let ready = !form.prompt.trim().is_empty() || form.image.is_some();
@@ -579,6 +609,8 @@ impl HubApp {
                 multiview: form.multiview,
                 rig_like: form.rig_like.clone(),
                 materials: Some(form.materials.trim().to_owned()).filter(|m| !m.is_empty()),
+                keep_look: form.rig_like.is_some() && form.keep_look,
+                repaint: form.repaint.filter(|_| form.rig_like.is_some()),
             };
             self.execute(command);
         }

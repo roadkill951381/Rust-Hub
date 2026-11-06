@@ -100,6 +100,14 @@ enum Cmd {
         /// Start of the material names when rigging, e.g. `surv_mei`.
         #[arg(long, requires = "rig_like")]
         materials: Option<String>,
+        /// Draw over the reference as it looks instead of a grey figure, to
+        /// remake that same character.
+        #[arg(long, requires = "rig_like")]
+        keep_look: bool,
+        /// How much of the reference the picture repaints, 0 to 1 (default
+        /// 0.88, or 0.7 with --keep-look).
+        #[arg(long, requires = "rig_like")]
+        repaint: Option<f32>,
         /// Also write the result here (.glb, .gltf, .stl or .3mf). A rigged
         /// character is copied as the rigged .glb.
         #[arg(short, long)]
@@ -276,6 +284,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             multiview,
             rig_like,
             materials,
+            keep_look,
+            repaint,
             output,
         } => {
             let rigged = rig_like.is_some();
@@ -295,6 +305,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     multiview,
                     rig_like,
                     materials,
+                    keep_look,
+                    repaint,
                 },
             )?;
             print(json, &outcome);

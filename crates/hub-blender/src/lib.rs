@@ -294,7 +294,13 @@ impl Rigger for Blender {
         serde_json::from_value(serde_json::Value::Object(report.rest))
             .map_err(|e| format!("unreadable rig report from Blender: {e}"))
     }
-    fn pose_views(&self, reference: &Path, sheet: bool, output: &Path) -> Result<(), String> {
+    fn pose_views(
+        &self,
+        reference: &Path,
+        sheet: bool,
+        textured: bool,
+        output: &Path,
+    ) -> Result<(), String> {
         let output = std::path::absolute(output)
             .map_err(|e| format!("could not resolve {}: {e}", output.display()))?;
         // The sizes FLUX draws characters at; the picture workflow scales
@@ -306,7 +312,7 @@ impl Rigger for Blender {
             "pose_views",
             Input::File(reference),
             Some(&output),
-            &json!({"sheet": sheet, "width": width, "height": height}),
+            &json!({"sheet": sheet, "textured": textured, "width": width, "height": height}),
         )?;
         Ok(())
     }
@@ -349,8 +355,14 @@ impl Rigger for LazyBlender {
         self.get()?.rig(request)
     }
 
-    fn pose_views(&self, reference: &Path, sheet: bool, output: &Path) -> Result<(), String> {
-        self.get()?.pose_views(reference, sheet, output)
+    fn pose_views(
+        &self,
+        reference: &Path,
+        sheet: bool,
+        textured: bool,
+        output: &Path,
+    ) -> Result<(), String> {
+        self.get()?.pose_views(reference, sheet, textured, output)
     }
 }
 

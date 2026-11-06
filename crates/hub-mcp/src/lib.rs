@@ -276,6 +276,16 @@ pub struct GenerateArgs {
     /// `surv_mei.body` and `surv_mei.clothes`; the reference's by default.
     #[serde(default)]
     pub materials: Option<String>,
+    /// With `rig_like`: draw over the reference as it looks (colours,
+    /// clothes) instead of a plain grey figure, to remake that same
+    /// character with a new face or details. Repaints 0.7 by default.
+    #[serde(default)]
+    pub keep_look: bool,
+    /// With `rig_like`: how much of the reference the picture repaints, 0
+    /// to 1 (default 0.88, or 0.7 with `keep_look`). Lower keeps the pose,
+    /// arms and colours better; higher follows the prompt and face more.
+    #[serde(default)]
+    pub repaint: Option<f32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -687,6 +697,8 @@ impl HubServer {
             multiview: a.multiview,
             rig_like: a.rig_like,
             materials: a.materials,
+            keep_look: a.keep_look,
+            repaint: a.repaint,
         };
         self.run_job(command, context).await
     }
