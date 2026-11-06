@@ -17,8 +17,9 @@ Read `README.md` for the architecture and roadmap.
   renderer re-uploads only when the pointer changes.
 - `hub-core` has no UI, GPU, process or network dependencies. Keep it that way.
   External tools sit behind the traits in `engine.rs` (`MeshTools` is Blender
-  in `hub-blender`, `Generator` is the hub-gen client in `hub-generate`);
-  front ends get them from `hub_engines::from_env()`.
+  in `hub-blender`, `Generator` is the hub-gen client in `hub-generate` or
+  ComfyUI in `hub-comfy`, routed by `hub_engines::Generators`); front ends get
+  them from `hub_engines::from_env()`.
 - Slow commands (`Command::is_job`) go through `Session::begin`, then
   `Job::run` off the UI or async thread, then `Session::finish`. Never hold the
   session lock while a job runs. `execute` still works for them, inline.

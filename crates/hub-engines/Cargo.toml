@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 hub-blender.workspace = true
 hub-core.workspace = true
+hub-comfy.workspace = true
 hub-generate.workspace = true
 
 [lints]

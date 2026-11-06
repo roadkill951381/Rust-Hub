@@ -15,13 +15,22 @@ use crate::work::{ReportCache, ReportKey, Running};
 const MODEL_EXTENSIONS: [&str; 4] = ["glb", "gltf", "stl", "3mf"];
 const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
 
-/// Shape models offered in the Generate panel: service name and label.
-const GENERATORS: [(&str, &str); 5] = [
-    ("", "Service default"),
+/// Shape models offered in the Generate panel: engine name and label.
+const GENERATORS: [(&str, &str); 6] = [
+    ("", "Default"),
     ("hunyuan3d-2", "Hunyuan3D 2 (best detail)"),
     ("hunyuan3d-2mini", "Hunyuan3D 2 mini (less memory)"),
     ("triposg", "TripoSG"),
+    ("comfyui", "ComfyUI (Hunyuan3D 2.1 or your workflow)"),
     ("demo", "Demo shapes (no GPU)"),
+];
+
+/// Text-to-image models for a prompt: engine name and label.
+const PAINTERS: [(&str, &str); 4] = [
+    ("", "Default"),
+    ("hunyuan-dit", "HunyuanDiT (hub-gen)"),
+    ("comfyui:flux-schnell", "FLUX schnell in ComfyUI"),
+    ("comfyui:flux-dev", "FLUX dev in ComfyUI (slower, finer)"),
 ];
 
 const OK: Color32 = Color32::from_rgb(110, 200, 120);
@@ -79,6 +88,8 @@ struct GenerateForm {
     image: Option<PathBuf>,
     /// Index into [`GENERATORS`].
     model: usize,
+    /// Index into [`PAINTERS`].
+    painter: usize,
     texture: bool,
     fixed_seed: bool,
     seed: u64,
@@ -91,6 +102,7 @@ impl Default for GenerateForm {
             prompt: String::new(),
             image: None,
             model: 0,
+            painter: 0,
             texture: false,
             fixed_seed: false,
             seed: 1234,
@@ -444,6 +456,18 @@ impl HubApp {
                     }
                 });
             ui.end_row();
+            ui.label("Picture by")
+                .on_hover_text("What turns the prompt into the picture the shape is made from");
+            ui.add_enabled_ui(form.image.is_none(), |ui| {
+                egui::ComboBox::from_id_salt("painter")
+                    .selected_text(PAINTERS[form.painter].1)
+                    .show_ui(ui, |ui| {
+                        for (i, (_, label)) in PAINTERS.iter().enumerate() {
+                            ui.selectable_value(&mut form.painter, i, *label);
+                        }
+                    });
+            });
+            ui.end_row();
             ui.label("Size");
             ui.add(
                 egui::DragValue::new(&mut form.size_mm)
@@ -481,6 +505,9 @@ impl HubApp {
                 prompt: (!prompt.is_empty()).then(|| prompt.to_owned()),
                 image: form.image.clone(),
                 model: Some(GENERATORS[form.model].0)
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_owned),
+                image_model: Some(PAINTERS[form.painter].0)
                     .filter(|m| !m.is_empty())
                     .map(str::to_owned),
                 texture: form.texture,

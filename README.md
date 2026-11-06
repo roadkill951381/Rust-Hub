@@ -93,6 +93,37 @@ Remesh, decimate and UV unwrap need [Blender](https://www.blender.org/download/)
 Nothing is contacted until a command needs it, and a command that needs a
 missing engine says how to set it up.
 
+### Use your ComfyUI
+
+The hub can also generate with your own [ComfyUI](https://github.com/comfyanonymous/ComfyUI),
+starting it if it isn't running (it looks in `C:\ComfyUI` and `~/ComfyUI`, or
+set `HUB_COMFY_DIR`), and unloading its models afterwards so the GPU is free.
+
+| Ask for | What happens |
+|---|---|
+| `--image-model comfyui` (app: Picture by "FLUX in ComfyUI") | FLUX in ComfyUI draws the picture, hub-gen's Hunyuan3D makes the shape |
+| `--model comfyui` | Both steps in ComfyUI: FLUX, then ComfyUI's built-in Hunyuan3D 2.1 nodes |
+| `--model comfyui:my-workflow` | Your own workflow does the whole job |
+
+Built-in workflows: `flux-schnell` and `flux-dev` (FLUX GGUF through
+ComfyUI-GGUF, with `t5xxl_fp8_e4m3fn`, `clip_l` and `ae`) and `hunyuan3d-2.1`
+(needs `hunyuan_3d_v2.1.safetensors` in `models/checkpoints`; ComfyUI's "Image
+to Model (Hunyuan3D 2.1)" template offers the download). To use your own, open
+it in ComfyUI, choose Workflow > Export (API), and save it as
+`~/RustHub/comfyui/<name>.json` with `{{prompt}}`, `{{image}}` (a LoadImage
+node's file) and `{{seed}}` where the hub should fill in values. A file named
+like a built-in one replaces it. A workflow that saves a GLB makes models; one
+that only saves images makes pictures.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HUB_COMFY_URL` | `http://127.0.0.1:8188` | Where ComfyUI listens |
+| `HUB_COMFY_DIR` | found automatically | ComfyUI folder, so the hub can start it |
+| `HUB_COMFY_WORKFLOWS` | `~/RustHub/comfyui` | Your exported workflows |
+| `HUB_COMFY_PICTURE_WORKFLOW` / `HUB_COMFY_MODEL_WORKFLOW` | `flux-schnell` / `hunyuan3d-2.1` | Defaults for `comfyui` |
+| `HUB_COMFY_KEEP_LOADED` | off | Keep ComfyUI's models on the GPU after a job |
+| `HUB_IMAGE_MODEL` / `HUB_SHAPE_MODEL` | none | Defaults for every request, e.g. `HUB_IMAGE_MODEL=comfyui` |
+
 ### Connect Claude
 
 Claude Code:
@@ -139,6 +170,7 @@ GPU works.
 | `hub-core` | Scene model, commands, undo history, file formats, print checks, hollowing, the asset library, and the engine traits. No UI, GPU, process or network code. |
 | `hub-blender` | Runs mesh jobs in Blender in the background (`MeshTools`). |
 | `hub-generate` | HTTP client for the hub-gen service (`Generator`). |
+| `hub-comfy` | Drives the person's ComfyUI and its workflows (`Generator`, and pictures for hub-gen). |
 | `hub-engines` | Picks the engines from the environment, so every front end behaves the same. |
 | `services/hub-gen` | The generation service itself, in Python (PyTorch). |
 | `hub-render` | wgpu renderer used by the app and by headless previews. |

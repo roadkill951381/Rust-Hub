@@ -226,9 +226,16 @@ pub struct GenerateArgs {
     /// Absolute path of a PNG or JPEG of one object, used instead of a prompt.
     #[serde(default)]
     pub image: Option<PathBuf>,
-    /// Shape model: hunyuan3d-2 (default), hunyuan3d-2mini or triposg.
+    /// Shape model: hunyuan3d-2 (default), hunyuan3d-2mini or triposg on the
+    /// hub-gen service, or "comfyui" / "comfyui:<workflow>" to run the whole
+    /// job in the person's ComfyUI.
     #[serde(default)]
     pub model: Option<String>,
+    /// Text-to-image model for a prompt: hunyuan-dit (default) or
+    /// flux-schnell on hub-gen, or "comfyui" to make the picture with the
+    /// person's ComfyUI (FLUX) and the shape on hub-gen.
+    #[serde(default)]
+    pub image_model: Option<String>,
     /// Also paint a colour texture (slower).
     #[serde(default)]
     pub texture: bool,
@@ -627,6 +634,7 @@ impl HubServer {
             prompt: a.prompt,
             image: a.image,
             model: a.model,
+            image_model: a.image_model,
             texture: a.texture,
             seed: a.seed,
             faces: a.faces,

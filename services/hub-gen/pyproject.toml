@@ -23,7 +23,8 @@ hunyuan = [
     "torch>=2.6",
     "torchvision>=0.21",
     "diffusers>=0.34",
-    "transformers>=4.48",
+    # 5.x renamed the DINOv2 layers that Hunyuan3D 2's checkpoints load by name.
+    "transformers>=4.48,<5",
     "accelerate>=1.2",
     "sentencepiece>=0.2",
     "rembg>=2.0.60",

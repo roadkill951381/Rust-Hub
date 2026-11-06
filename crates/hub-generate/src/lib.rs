@@ -51,6 +51,8 @@ struct JobRequest<'a> {
     image_b64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_model: Option<&'a str>,
     texture: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<u64>,
@@ -73,6 +75,8 @@ struct JobView {
 #[derive(Debug, Clone, Deserialize)]
 struct JobResult {
     model: String,
+    #[serde(default)]
+    image_model: Option<String>,
     #[serde(default)]
     prompt: Option<String>,
     seed: u64,
@@ -224,6 +228,7 @@ impl Client {
             prompt: request.prompt.as_deref(),
             image_b64,
             model: request.model.as_deref(),
+            image_model: request.image_model.as_deref(),
             texture: request.texture,
             seed: request.seed,
             faces: request.faces,
@@ -303,6 +308,7 @@ impl Generator for Client {
             path,
             info: GenerationInfo {
                 model: result.model,
+                image_model: result.image_model,
                 prompt: result.prompt,
                 seed: result.seed,
                 textured: result.textured,

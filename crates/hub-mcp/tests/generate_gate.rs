@@ -69,6 +69,7 @@ impl Generator for RoughGenerator {
             path,
             info: GenerationInfo {
                 model: "test".into(),
+                image_model: None,
                 prompt: request.prompt.clone(),
                 seed: request.seed.unwrap_or(1),
                 textured: false,

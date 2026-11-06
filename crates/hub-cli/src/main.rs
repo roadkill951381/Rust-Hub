@@ -65,9 +65,14 @@ enum Cmd {
         /// A picture of the object to build from, instead of a prompt.
         #[arg(long)]
         image: Option<PathBuf>,
-        /// Shape model: hunyuan3d-2, hunyuan3d-2mini, triposg (service default if omitted).
+        /// Shape model: hunyuan3d-2, hunyuan3d-2mini, triposg (service default if
+        /// omitted), or comfyui[:WORKFLOW] to run the whole job in ComfyUI.
         #[arg(long)]
         model: Option<String>,
+        /// Text-to-image model for the prompt: hunyuan-dit, flux-schnell, or
+        /// comfyui[:WORKFLOW] to make the picture in ComfyUI.
+        #[arg(long)]
+        image_model: Option<String>,
         /// Also paint a colour texture.
         #[arg(long)]
         texture: bool,
@@ -219,6 +224,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             prompt,
             image,
             model,
+            image_model,
             texture,
             seed,
             faces,
@@ -232,6 +238,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     prompt,
                     image,
                     model,
+                    image_model,
                     texture,
                     seed,
                     faces,

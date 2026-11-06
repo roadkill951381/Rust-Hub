@@ -64,9 +64,15 @@ pub struct GenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<PathBuf>,
     /// Shape model, such as "hunyuan3d-2", "hunyuan3d-2mini" or "triposg";
-    /// the service's default when omitted.
+    /// the service's default when omitted. "comfyui" (or "comfyui:<workflow>")
+    /// runs the whole job in ComfyUI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Text-to-image model that turns the prompt into the picture the shape is
+    /// made from, such as "hunyuan-dit" or "flux-schnell"; "comfyui" (or
+    /// "comfyui:<workflow>") makes it in ComfyUI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_model: Option<String>,
     /// Paint a colour texture onto the shape (slower, needs more GPU memory).
     #[serde(default)]
     pub texture: bool,
@@ -82,6 +88,9 @@ pub struct GenerateRequest {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct GenerationInfo {
     pub model: String,
+    /// The text-to-image model, when a picture was made from the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     pub seed: u64,

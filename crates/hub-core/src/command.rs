@@ -161,9 +161,14 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         image: Option<PathBuf>,
         /// Shape model: "hunyuan3d-2", "hunyuan3d-2mini" or "triposg";
-        /// the service's default when omitted.
+        /// the service's default when omitted. "comfyui" or
+        /// "comfyui:<workflow>" runs the whole job in ComfyUI.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Text-to-image model for a prompt: "hunyuan-dit", "flux-schnell",
+        /// or "comfyui" / "comfyui:<workflow>" to make the picture in ComfyUI.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_model: Option<String>,
         /// Also paint a colour texture (slower, needs more GPU memory).
         #[serde(default)]
         texture: bool,
