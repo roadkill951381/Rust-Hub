@@ -39,8 +39,9 @@ triposg = [
     "scikit-image>=0.24",
     "omegaconf>=2.3",
     "einops>=0.8",
-    "diso>=0.1.4",
 ]
+# TripoSG also needs `diso`, which builds against the installed PyTorch and so
+# cannot be locked here; install it afterwards (see README).
 # FLUX.1-schnell text-to-image, 4-bit so it fits a 16 GB card.
 flux = ["bitsandbytes>=0.45", "protobuf>=5.28"]
 

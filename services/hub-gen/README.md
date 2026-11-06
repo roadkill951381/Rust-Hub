@@ -74,6 +74,8 @@ it did not install itself.
 ```powershell
 git clone https://github.com/VAST-AI-Research/TripoSG C:\src\TripoSG
 uv sync --extra hunyuan --extra triposg
+uv pip install setuptools wheel
+uv pip install --no-build-isolation diso     # builds against the installed PyTorch
 $env:HUB_GEN_TRIPOSG_DIR = "C:\src\TripoSG"
 uv run hub-gen serve --model triposg
 ```
