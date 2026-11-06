@@ -67,6 +67,10 @@ cd services\hub-gen
 uv sync --extra hunyuan --extra paint
 ```
 
+The extension's source is kept in `vendor/custom_rasterizer`, upstream's code
+with a small fix so nvcc 12 and MSVC 14.4x can compile it on Windows (see its
+`RUST-HUB-CHANGES.md`, `LICENSE` and `NOTICE`).
+
 If that build fails, install both by hand:
 
 ```powershell
