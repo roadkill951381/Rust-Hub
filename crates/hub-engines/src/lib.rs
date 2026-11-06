@@ -175,8 +175,14 @@ mod tests {
 
     #[test]
     fn faces_and_turnarounds_pick_their_comfy_workflows() {
-        assert_eq!(picture_workflow(&request(None, false, false)), Picture::HubGen);
-        assert_eq!(picture_workflow(&request(None, false, true)), Picture::HubGen);
+        assert_eq!(
+            picture_workflow(&request(None, false, false)),
+            Picture::HubGen
+        );
+        assert_eq!(
+            picture_workflow(&request(None, false, true)),
+            Picture::HubGen
+        );
         assert_eq!(
             picture_workflow(&request(Some("comfyui"), false, false)),
             Picture::Comfy(None)
