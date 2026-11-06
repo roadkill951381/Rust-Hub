@@ -279,3 +279,34 @@ def test_only_bundled_custom_pipelines_are_trusted(tmp_path):
         assert Pipeline.from_pretrained("w", custom_pipeline="org/remote")[2] is None
         assert Pipeline.from_pretrained("w")[2] is None
     assert Pipeline.from_pretrained("w", custom_pipeline=str(bundled))[2] is None
+
+
+def test_painted_textures_take_the_pictures_colours():
+    import numpy as np
+    import trimesh
+    from PIL import Image
+
+    from hub_gen.colour import lab_to_rgb, match_colours, rgb_to_lab, texture_of
+
+    rgb = np.random.default_rng(1).random((50, 3))
+    assert np.allclose(lab_to_rgb(rgb_to_lab(rgb)), rgb, atol=1e-6)
+
+    # A pale grey texture, half lighter, on a box with UVs.
+    box = trimesh.creation.box()
+    uv = np.column_stack([(box.vertices[:, 0] > 0) * 0.5 + 0.25, box.vertices[:, 1] * 0 + 0.5])
+    pale = np.full((64, 64, 3), 150, np.uint8)
+    pale[:, 32:] = 170
+    box.visual = trimesh.visual.TextureVisuals(uv=uv, image=Image.fromarray(pale))
+    # The picture: a deep red subject, darker on one side, on a clear background.
+    picture = np.zeros((64, 64, 4), np.uint8)
+    picture[16:48, 16:32] = (200, 30, 40, 255)
+    picture[16:48, 32:48] = (120, 15, 20, 255)
+
+    matched = match_colours(box, [Image.fromarray(picture, "RGBA")])
+    out = np.asarray(texture_of(matched).convert("RGB"), dtype=float)
+    assert out[..., 0].mean() > out[..., 1].mean() + 40, "the texture turned red"
+    assert out[:, 40, 0].mean() > out[:, 10, 0].mean(), "light and dark stay in order"
+    assert np.asarray(texture_of(box)).mean() == pale.mean(), "the input is left alone"
+
+    plain = trimesh.creation.box()
+    assert match_colours(plain, [Image.fromarray(picture, "RGBA")]) is plain

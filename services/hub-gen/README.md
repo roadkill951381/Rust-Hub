@@ -93,6 +93,10 @@ one you give), cuts it into views at the gaps between figures, builds the
 shape from all of them with `hunyuan3d-2mv`, and paints with every view. A
 sheet whose figures can't be told apart is used as a single front view.
 
+After painting, the texture's colours are matched to the picture's subject
+(mean and spread in CIE Lab), because Hunyuan3D-Paint bakes them paler and
+greyer than the views it paints from.
+
 Weight downloads fetch only the files a model loads: where a folder has a
 `.safetensors` file, its `.bin`, `.ckpt` and `.pt` duplicates are skipped.
 

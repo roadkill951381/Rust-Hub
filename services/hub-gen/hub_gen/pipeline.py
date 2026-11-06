@@ -15,6 +15,7 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 
 from hub_gen.backends.base import MODELS, Kind, Models
+from hub_gen.colour import match_colours
 from hub_gen.config import Settings
 from hub_gen.imaging import SHEET_VIEWS, frame_object, remove_background, split_sheet
 from hub_gen.meshops import clean
@@ -149,6 +150,8 @@ class Pipeline:
             painter = self._load(self.settings.texture_model, "texture", report, shape_end + 0.01)
             reference = list(views.values()) if len(views) > 1 else framed
             mesh = painter.paint(mesh, reference, report=span(report, shape_end + 0.02, 0.98))
+            report(0.98, "matching the texture's colours to the picture")
+            mesh = match_colours(mesh, list(views.values()))
 
         mesh.export(out / "mesh.glb")
         files.append("mesh.glb")
