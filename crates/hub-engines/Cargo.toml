@@ -1,0 +1,15 @@
+[package]
+name = "hub-engines"
+description = "Assembles Rust-Hub's engines (Blender, the generation service, the asset library) for front ends."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hub-blender.workspace = true
+hub-core.workspace = true
+hub-generate.workspace = true
+
+[lints]
+workspace = true

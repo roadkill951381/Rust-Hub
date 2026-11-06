@@ -52,10 +52,10 @@ impl Bvh {
             .triangles()
             .map(|t| t.map(|i| mesh.positions[i as usize]))
             .collect();
-        Self::from_triangles(tris)
+        Self::from_triangles(&tris)
     }
 
-    pub fn from_triangles(tris: Vec<[Vec3; 3]>) -> Self {
+    pub fn from_triangles(tris: &[[Vec3; 3]]) -> Self {
         let n = tris.len();
         let centroids: Vec<Vec3> = tris.iter().map(|t| (t[0] + t[1] + t[2]) / 3.0).collect();
         let mut order: Vec<u32> = (0..n as u32).collect();
@@ -67,7 +67,7 @@ impl Bvh {
                 start: 0,
                 count: 0,
             });
-            build(&mut nodes, 0, &tris, &centroids, &mut order, 0);
+            build(&mut nodes, 0, tris, &centroids, &mut order, 0);
         }
         let sorted = order.iter().map(|&i| tris[i as usize]).collect();
         Self {
@@ -108,7 +108,13 @@ impl Bvh {
     }
 
     /// Visits triangles the ray hits; `visit` returns the current far limit.
-    fn walk_ray(&self, origin: Vec3, dir: Vec3, t_min: f32, mut visit: impl FnMut(f32, u32) -> f32) {
+    fn walk_ray(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        t_min: f32,
+        mut visit: impl FnMut(f32, u32) -> f32,
+    ) {
         if self.nodes.is_empty() {
             return;
         }

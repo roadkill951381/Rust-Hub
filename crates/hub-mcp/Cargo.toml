@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 base64 = "0.23"
 hub-core.workspace = true
+hub-engines.workspace = true
 hub-render.workspace = true
 rmcp.workspace = true
 schemars.workspace = true

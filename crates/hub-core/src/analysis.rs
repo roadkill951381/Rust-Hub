@@ -515,7 +515,10 @@ pub fn fill_holes(mesh: &Mesh) -> (Mesh, usize, usize) {
                 if k < ring.len() {
                     representative[ring[k] as usize]
                 } else {
-                    push_vertex(out, points.iter().copied().sum::<Vec3>() / points.len() as f32)
+                    push_vertex(
+                        out,
+                        points.iter().copied().sum::<Vec3>() / points.len() as f32,
+                    )
                 }
             };
             let mut centre = None;
@@ -567,7 +570,12 @@ fn triangulate_hole(points: &[Vec3]) -> Vec<[usize; 3]> {
     let sliver = f64::from(scale * scale) * 1e-10;
     let penalty = f64::from(scale * scale) * 10.0;
     let area = |i: usize, k: usize, j: usize| -> f64 {
-        let a = f64::from((points[k] - points[i]).cross(points[j] - points[i]).length() * 0.5);
+        let a = f64::from(
+            (points[k] - points[i])
+                .cross(points[j] - points[i])
+                .length()
+                * 0.5,
+        );
         if a < sliver { a + penalty } else { a }
     };
     let mut cost = vec![0.0_f64; n * n];
@@ -716,10 +724,10 @@ fn classify_shells(mesh: &Mesh, shell_of: &[Option<usize>], volumes: &[f64]) -> 
     let tris: Vec<[u32; 3]> = mesh.triangles().collect();
     // An irrational-looking direction, so rays rarely graze edges exactly.
     let dir = Vec3::new(0.577_215_7, 0.618_034, 0.531_329_3).normalize();
-    for s in 0..volumes.len() {
-        if kinds[s] == ShellKind::Solid {
-            continue;
-        }
+    let candidates: Vec<usize> = (0..kinds.len())
+        .filter(|&s| kinds[s] != ShellKind::Solid)
+        .collect();
+    for s in candidates {
         let Some(f) = shell_of.iter().position(|&x| x == Some(s)) else {
             continue;
         };
@@ -814,9 +822,8 @@ mod tests {
     #[test]
     fn thin_plates_get_a_wall_warning() {
         // 40 × 40 × 0.5 mm: printable, but below the 0.8 mm default.
-        let plate = primitives::cube(1.0).transformed(glam::Mat4::from_scale(Vec3::new(
-            0.04, 0.0005, 0.04,
-        )));
+        let plate = primitives::cube(1.0)
+            .transformed(glam::Mat4::from_scale(Vec3::new(0.04, 0.0005, 0.04)));
         let report = check_printable(&object(plate));
         assert!(report.printable, "{:?}", report.issues);
         let wall = report.wall.as_ref().unwrap();

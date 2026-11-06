@@ -1,5 +1,6 @@
 //! A session owns the scene and its undo history and executes commands.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use glam::{Mat4, Quat, Vec3};
@@ -112,6 +113,10 @@ impl Session {
     }
 
     /// Commits a finished job.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "a job's output is committed once"
+    )]
     pub fn finish(&mut self, output: JobOutput) -> Result<Outcome> {
         let mut next = self.scene.clone();
         let outcome = output.apply(&mut next, &self.engines)?;
@@ -252,7 +257,12 @@ impl Session {
 }
 
 impl Session {
-    fn save_asset(&self, name: &str, ids: Option<&[ObjectId]>, note: Option<String>) -> Result<Outcome> {
+    fn save_asset(
+        &self,
+        name: &str,
+        ids: Option<&[ObjectId]>,
+        note: Option<String>,
+    ) -> Result<Outcome> {
         let library = library(&self.engines)?;
         let ids = self.scene.resolve(ids)?;
         let objects: Vec<&Object> = ids
@@ -268,7 +278,11 @@ impl Session {
         let (asset, path) = library.save(name, new, |p| io::export(p, &objects))?;
         let version = asset.latest().map_or(1, |v| v.version);
         Ok(Outcome {
-            summary: format!("Saved {} version {version} to {}", asset.name, path.display()),
+            summary: format!(
+                "Saved {} version {version} to {}",
+                asset.name,
+                path.display()
+            ),
             saved: Some(SavedAsset {
                 name: asset.name,
                 version,
@@ -296,7 +310,12 @@ impl Session {
                     wall: wall_mm * MM,
                     voxel: voxel_mm.map(|v| v * MM),
                 };
-                Work::Mesh(self.targets(objects)?.into_iter().map(|t| (t, op)).collect())
+                Work::Mesh(
+                    self.targets(objects.as_deref())?
+                        .into_iter()
+                        .map(|t| (t, op))
+                        .collect(),
+                )
             }
             Command::Remesh { objects, voxel_mm } => {
                 positive(voxel_mm, "voxel_mm")?;
@@ -304,7 +323,12 @@ impl Session {
                 let op = MeshWork::Tool(MeshOp::VoxelRemesh {
                     voxel: voxel_mm * MM,
                 });
-                Work::Mesh(self.targets(objects)?.into_iter().map(|t| (t, op)).collect())
+                Work::Mesh(
+                    self.targets(objects.as_deref())?
+                        .into_iter()
+                        .map(|t| (t, op))
+                        .collect(),
+                )
             }
             Command::Decimate {
                 objects,
@@ -312,7 +336,7 @@ impl Session {
                 triangles,
             } => {
                 mesh_tools(&self.engines)?;
-                let targets = self.targets(objects)?;
+                let targets = self.targets(objects.as_deref())?;
                 let mut items = Vec::with_capacity(targets.len());
                 for t in targets {
                     let r = match (ratio, triangles) {
@@ -354,7 +378,12 @@ impl Session {
                     ));
                 }
                 let op = MeshWork::Tool(MeshOp::UvUnwrap { angle_deg, margin });
-                Work::Mesh(self.targets(objects)?.into_iter().map(|t| (t, op)).collect())
+                Work::Mesh(
+                    self.targets(objects.as_deref())?
+                        .into_iter()
+                        .map(|t| (t, op))
+                        .collect(),
+                )
             }
             Command::Generate {
                 prompt,
@@ -406,9 +435,9 @@ impl Session {
         })
     }
 
-    fn targets(&self, ids: Option<Vec<ObjectId>>) -> Result<Vec<Target>> {
+    fn targets(&self, ids: Option<&[ObjectId]>) -> Result<Vec<Target>> {
         self.scene
-            .resolve(ids.as_deref())?
+            .resolve(ids)?
             .into_iter()
             .map(|id| {
                 let o = self.scene.get(id)?;
@@ -502,7 +531,10 @@ impl Job {
                 let count = items.len();
                 let mut replaced = Vec::with_capacity(count);
                 for (i, (target, op)) in items.into_iter().enumerate() {
-                    progress(i as f32 / count as f32, &format!("{}: {}", self.label, target.name));
+                    progress(
+                        i as f32 / count as f32,
+                        &format!("{}: {}", self.label, target.name),
+                    );
                     let world = target.mesh.transformed(target.transform);
                     let (after, detail) = match op {
                         MeshWork::Hollow { wall, voxel } => hollowed(&world, wall, voxel, &target)?,
@@ -510,7 +542,10 @@ impl Job {
                             let tools = mesh_tools(&self.engines)?;
                             let out = tools.apply(&world, op).map_err(Error::Engine)?;
                             out.validate().map_err(|e| {
-                                Error::Engine(format!("{} returned a broken mesh: {e}", tools.describe()))
+                                Error::Engine(format!(
+                                    "{} returned a broken mesh: {e}",
+                                    tools.describe()
+                                ))
                             })?;
                             let detail = format!(
                                 "{}: {} to {} triangles",
@@ -597,7 +632,12 @@ impl JobOutput {
     }
 }
 
-fn hollowed(world: &Mesh, wall: f32, voxel: Option<f32>, target: &Target) -> Result<(Mesh, String)> {
+fn hollowed(
+    world: &Mesh,
+    wall: f32,
+    voxel: Option<f32>,
+    target: &Target,
+) -> Result<(Mesh, String)> {
     let t = analysis::topology(world);
     if !t.is_watertight() || t.flipped_edges > 0 || world.signed_volume() <= 0.0 {
         return Err(Error::InvalidArgument(format!(
@@ -605,8 +645,8 @@ fn hollowed(world: &Mesh, wall: f32, voxel: Option<f32>, target: &Target) -> Res
             target.name
         )));
     }
-    let (mut inner, cavity) =
-        hollow::cavity(world, wall, voxel).map_err(|e| Error::InvalidArgument(format!("{}: {e}", target.name)))?;
+    let (mut inner, cavity) = hollow::cavity(world, wall, voxel)
+        .map_err(|e| Error::InvalidArgument(format!("{}: {e}", target.name)))?;
     if !world.normals.is_empty() {
         inner.compute_normals();
     }
@@ -692,7 +732,7 @@ fn finish_generation(
         info.model, info.seconds, info.seed
     );
     if let Some(s) = &saved {
-        summary.push_str(&format!("; saved as {} version {}", s.name, s.version));
+        let _ = write!(summary, "; saved as {} version {}", s.name, s.version);
     }
     Ok(Outcome {
         summary,
@@ -715,7 +755,11 @@ fn name_from_prompt(prompt: &str) -> String {
         .map(|w| {
             let mut c = w.chars();
             c.next()
-                .map(|f| f.to_uppercase().chain(c.flat_map(char::to_lowercase)).collect())
+                .map(|f| {
+                    f.to_uppercase()
+                        .chain(c.flat_map(char::to_lowercase))
+                        .collect()
+                })
                 .unwrap_or_default()
         })
         .collect();
@@ -1242,7 +1286,11 @@ mod tests {
         assert!(report.printable, "{:?}", report.issues);
         assert_eq!(report.topology.cavities, 1);
         // 20³ minus about 16³ mm³.
-        assert!((report.volume_mm3 - 3904.0).abs() < 300.0, "{}", report.volume_mm3);
+        assert!(
+            (report.volume_mm3 - 3904.0).abs() < 300.0,
+            "{}",
+            report.volume_mm3
+        );
         assert!(s.scene().get(id).unwrap().mesh.triangle_count() > 12);
         s.execute(Command::Undo).unwrap();
         assert_eq!(s.scene().get(id).unwrap().mesh.triangle_count(), 12);
@@ -1394,7 +1442,7 @@ mod tests {
         let engines = Engines {
             mesh_tools: Some(Arc::new(FakeTools)),
             generator: Some(Arc::new(FakeGenerator(dir.path().to_owned()))),
-            library: Some(Library::open(dir.path().join("library")).unwrap()),
+            library: Some(Library::open(dir.path().join("library"))),
         };
         let mut s = Session::with_engines(engines);
         let out = s
@@ -1416,7 +1464,10 @@ mod tests {
         assert!((b.size().max_element() - 0.04).abs() < 1e-5);
         assert!(b.min.y.abs() < 1e-6, "rests on the floor");
         let saved = out.saved.unwrap();
-        assert_eq!((saved.name.as_str(), saved.version), ("Small Round Pebble", 1));
+        assert_eq!(
+            (saved.name.as_str(), saved.version),
+            ("Small Round Pebble", 1)
+        );
         assert_eq!(out.generation.unwrap().seed, 3);
 
         let out = s

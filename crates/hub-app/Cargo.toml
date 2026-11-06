@@ -16,6 +16,7 @@ egui.workspace = true
 egui-wgpu.workspace = true
 glam.workspace = true
 hub-core.workspace = true
+hub-engines.workspace = true
 hub-render.workspace = true
 rfd.workspace = true
 tracing.workspace = true

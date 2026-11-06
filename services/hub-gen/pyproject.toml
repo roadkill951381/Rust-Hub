@@ -1,0 +1,77 @@
+[project]
+name = "hub-gen"
+version = "0.1.0"
+description = "Rust-Hub's local 3D generation service: text or image to 3D model on your own GPU."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "pydantic>=2.9",
+    "numpy>=1.26",
+    "pillow>=10.4",
+    "trimesh>=4.5",
+    "fast-simplification>=0.1.9",
+    "scipy>=1.13",
+]
+
+[project.optional-dependencies]
+# Hunyuan3D 2 shape and texture models, HunyuanDiT text-to-image, and
+# background removal. Pulls CUDA PyTorch on Windows and Linux.
+hunyuan = [
+    "torch>=2.6",
+    "torchvision>=0.21",
+    "diffusers>=0.34",
+    "transformers>=4.48",
+    "accelerate>=1.2",
+    "sentencepiece>=0.2",
+    "rembg>=2.0.60",
+    "onnxruntime-gpu>=1.20; sys_platform != 'darwin'",
+    "onnxruntime>=1.20; sys_platform == 'darwin'",
+    "hy3dgen @ git+https://github.com/Tencent-Hunyuan/Hunyuan3D-2@f8db63096c8282cb27354314d896feba5ba6ff8a",
+]
+# TripoSG's extra needs; the TripoSG code itself is a git checkout (see README).
+triposg = [
+    "peft>=0.13",
+    "jaxtyping>=0.2",
+    "typeguard>=4.3",
+    "scikit-image>=0.24",
+    "omegaconf>=2.3",
+    "einops>=0.8",
+    "diso>=0.1.4",
+]
+# FLUX.1-schnell text-to-image, 4-bit so it fits a 16 GB card.
+flux = ["bitsandbytes>=0.45", "protobuf>=5.28"]
+
+[project.scripts]
+hub-gen = "hub_gen.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "httpx>=0.28", "ruff>=0.8"]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", marker = "sys_platform != 'darwin'" }]
+torchvision = [{ index = "pytorch-cu128", marker = "sys_platform != 'darwin'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

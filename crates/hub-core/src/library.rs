@@ -81,14 +81,9 @@ pub struct Library {
 }
 
 impl Library {
-    /// Opens (creating if needed) a library at `root`.
-    pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
-        let root = root.into();
-        std::fs::create_dir_all(&root).map_err(|source| Error::Write {
-            path: root.clone(),
-            source,
-        })?;
-        Ok(Self { root })
+    /// A library at `root`. Nothing is created until the first save.
+    pub fn open(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
     }
 
     /// `HUB_LIBRARY`, else `~/RustHub/library`.
@@ -143,10 +138,16 @@ impl Library {
 
     /// Every asset whose name contains `query` (case-insensitive), by name.
     pub fn list(&self, query: Option<&str>) -> Result<Vec<Asset>> {
-        let entries = std::fs::read_dir(&self.root).map_err(|source| Error::Read {
-            path: self.root.clone(),
-            source,
-        })?;
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(Error::Read {
+                    path: self.root.clone(),
+                    source,
+                });
+            }
+        };
         let needle = query.map(str::to_lowercase);
         let mut assets = Vec::new();
         for entry in entries.flatten() {
@@ -161,24 +162,31 @@ impl Library {
                 assets.push(asset);
             }
         }
-        assets.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        assets.sort_by_cached_key(|a| a.name.to_lowercase());
         Ok(assets)
     }
 
     /// The asset called `name` and the file of `version` (the latest when `None`).
     pub fn find(&self, name: &str, version: Option<u32>) -> Result<(Asset, AssetVersion, PathBuf)> {
         let slug = slug(name)?;
-        let asset = self
-            .read(&slug)?
-            .ok_or_else(|| Error::Library(format!("no asset called {name:?} in {}", self.root.display())))?;
+        let asset = self.read(&slug)?.ok_or_else(|| {
+            Error::Library(format!(
+                "no asset called {name:?} in {}",
+                self.root.display()
+            ))
+        })?;
         let chosen = match version {
-            Some(n) => asset.versions.iter().find(|v| v.version == n).ok_or_else(|| {
-                Error::Library(format!(
-                    "{} has versions 1 to {}, not {n}",
-                    asset.name,
-                    asset.versions.len()
-                ))
-            })?,
+            Some(n) => asset
+                .versions
+                .iter()
+                .find(|v| v.version == n)
+                .ok_or_else(|| {
+                    Error::Library(format!(
+                        "{} has versions 1 to {}, not {n}",
+                        asset.name,
+                        asset.versions.len()
+                    ))
+                })?,
             None => asset
                 .latest()
                 .ok_or_else(|| Error::Library(format!("{} has no versions", asset.name)))?,
@@ -195,9 +203,12 @@ impl Library {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(Error::Read { path, source }),
         };
-        serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|e| Error::Library(format!("{} is not a valid asset index: {e}", path.display())))
+        serde_json::from_str(&text).map(Some).map_err(|e| {
+            Error::Library(format!(
+                "{} is not a valid asset index: {e}",
+                path.display()
+            ))
+        })
     }
 
     fn write_index(&self, asset: &Asset) -> Result<()> {
@@ -247,7 +258,8 @@ mod tests {
     #[test]
     fn versions_accumulate_and_load() {
         let dir = tempfile::tempdir().unwrap();
-        let lib = Library::open(dir.path()).unwrap();
+        let lib = Library::open(dir.path().join("lib"));
+        assert_eq!(lib.list(None).unwrap(), Vec::<Asset>::new());
         for _ in 0..2 {
             lib.save("Big Knight!", version(), |p| {
                 std::fs::write(p, b"glb").map_err(|source| Error::Write {
@@ -266,7 +278,7 @@ mod tests {
         assert!(path.ends_with("big-knight/v0002.glb"));
         assert!(lib.find("big knight", Some(9)).is_err());
         assert!(lib.find("dragon", None).is_err());
-        assert!(lib.list(Some("dragon")).unwrap().is_empty());
+        assert_eq!(lib.list(Some("dragon")).unwrap(), Vec::<Asset>::new());
         assert!(slug("!!").is_err());
     }
 }

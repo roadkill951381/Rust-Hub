@@ -27,7 +27,9 @@ pub mod scene;
 pub mod session;
 
 pub use command::{Command, ObjectInfo, Outcome, SavedAsset, SizeAxis};
-pub use engine::{Engines, GenerateRequest, Generated, GenerationInfo, Generator, MeshOp, MeshTools};
+pub use engine::{
+    Engines, GenerateRequest, Generated, GenerationInfo, Generator, MeshOp, MeshTools,
+};
 pub use error::{Error, Result};
 pub use mesh::{Aabb, Mesh};
 pub use scene::{Material, Object, ObjectId, Scene, Transform};

@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
-use hub_core::{Command, Outcome, Session, SizeAxis};
+use hub_core::{Command, Outcome, Session, SizeAxis, Step};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -30,7 +30,12 @@ enum Cmd {
     /// List the objects in a model file with sizes in millimetres.
     Info { file: PathBuf },
     /// Check a model for 3D printing. Exits with status 2 when it is not printable.
-    Check { file: PathBuf },
+    Check {
+        file: PathBuf,
+        /// Thinnest acceptable wall in millimetres.
+        #[arg(long, default_value_t = 0.8)]
+        min_wall_mm: f32,
+    },
     /// Convert between .glb, .gltf, .stl and .3mf, optionally preparing for print.
     Convert {
         input: PathBuf,
@@ -38,13 +43,51 @@ enum Cmd {
         /// Scale uniformly so the longest side is this many millimetres.
         #[arg(long)]
         size_mm: Option<f32>,
-        /// Repair winding, zero-area and duplicate faces first.
+        /// Repair first: winding, zero-area and duplicate faces, holes.
         #[arg(long)]
         repair: bool,
+        /// With --repair, also delete loose pieces smaller than this fraction
+        /// of the largest one's volume (0.01 suits AI-generated models).
+        #[arg(long, requires = "repair")]
+        remove_small_shells: Option<f32>,
+        /// Hollow for resin printing with walls this many millimetres thick.
+        #[arg(long)]
+        hollow: Option<f32>,
         /// Centre on the origin and rest on the floor.
         #[arg(long)]
         place_on_floor: bool,
     },
+    /// Generate a model from a prompt or picture on the local hub-gen service
+    /// (your own GPU), save it to the asset library, and optionally export it.
+    Generate {
+        /// What to make: one object.
+        prompt: Option<String>,
+        /// A picture of the object to build from, instead of a prompt.
+        #[arg(long)]
+        image: Option<PathBuf>,
+        /// Shape model: hunyuan3d-2, hunyuan3d-2mini, triposg (service default if omitted).
+        #[arg(long)]
+        model: Option<String>,
+        /// Also paint a colour texture.
+        #[arg(long)]
+        texture: bool,
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Target triangle count.
+        #[arg(long)]
+        faces: Option<u32>,
+        /// Name for the library asset.
+        #[arg(long)]
+        name: Option<String>,
+        /// Scale so the longest side is this many millimetres.
+        #[arg(long)]
+        size_mm: Option<f32>,
+        /// Also write the result here (.glb, .gltf, .stl or .3mf).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// List the asset library, optionally only names containing QUERY.
+    Assets { query: Option<String> },
     /// Render a model to a PNG with the viewport renderer.
     Render {
         file: PathBuf,
@@ -83,15 +126,18 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     let json = cli.json;
-    let mut session = Session::new();
+    let mut session = Session::with_engines(hub_engines::from_env());
     match cli.command {
         Cmd::Info { file } => {
             session.execute(Command::Import { path: file })?;
             print(json, &session.execute(Command::ListObjects)?);
         }
-        Cmd::Check { file } => {
+        Cmd::Check { file, min_wall_mm } => {
             session.execute(Command::Import { path: file })?;
-            let outcome = session.execute(Command::CheckPrintable { objects: None })?;
+            let outcome = session.execute(Command::CheckPrintable {
+                objects: None,
+                min_wall_mm: Some(min_wall_mm),
+            })?;
             print(json, &outcome);
             if outcome.reports.iter().any(|r| !r.printable) {
                 return Ok(ExitCode::from(2));
@@ -102,11 +148,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
             output,
             size_mm,
             repair,
+            remove_small_shells,
+            hollow,
             place_on_floor,
         } => {
             session.execute(Command::Import { path: input })?;
             if repair {
-                session.execute(Command::Repair { objects: None })?;
+                session.execute(Command::Repair {
+                    objects: None,
+                    fill_holes: None,
+                    remove_small_shells,
+                })?;
             }
             if let Some(size_mm) = size_mm {
                 session.execute(Command::ScaleToSize {
@@ -114,6 +166,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     size_mm,
                     axis: SizeAxis::Longest,
                 })?;
+            }
+            if let Some(wall_mm) = hollow {
+                print(
+                    json,
+                    &run_with_progress(
+                        &mut session,
+                        Command::Hollow {
+                            objects: None,
+                            wall_mm,
+                            voxel_mm: None,
+                        },
+                    )?,
+                );
             }
             if place_on_floor {
                 session.execute(Command::PlaceOnFloor { objects: None })?;
@@ -150,6 +215,42 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 &Outcome::summary(format!("Rendered {}", output.display())),
             );
         }
+        Cmd::Generate {
+            prompt,
+            image,
+            model,
+            texture,
+            seed,
+            faces,
+            name,
+            size_mm,
+            output,
+        } => {
+            let outcome = run_with_progress(
+                &mut session,
+                Command::Generate {
+                    prompt,
+                    image,
+                    model,
+                    texture,
+                    seed,
+                    faces,
+                    name,
+                    size_mm,
+                },
+            )?;
+            print(json, &outcome);
+            if let Some(path) = output {
+                print(
+                    json,
+                    &session.execute(Command::Export {
+                        path,
+                        objects: None,
+                    })?,
+                );
+            }
+        }
+        Cmd::Assets { query } => print(json, &session.execute(Command::ListAssets { query })?),
         Cmd::Run { script } => return run_script(&mut session, &script, json),
         Cmd::Schema => {
             let schema = schemars::schema_for!(Command);
@@ -165,6 +266,32 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Runs a command, showing a job's progress on stderr.
+fn run_with_progress(session: &mut Session, command: Command) -> Result<Outcome> {
+    match session.begin(command)? {
+        Step::Done(outcome) => Ok(outcome),
+        Step::Job(job) => {
+            let interactive = std::io::IsTerminal::is_terminal(&std::io::stderr());
+            let last = std::sync::Mutex::new(String::new());
+            let output = job.run(&|fraction, stage| {
+                let mut last = last
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if interactive {
+                    eprint!("\r{:5.1}%  {stage:<48}", fraction * 100.0);
+                } else if *last != stage {
+                    eprintln!("{:5.1}%  {stage}", fraction * 100.0);
+                }
+                stage.clone_into(&mut last);
+            });
+            if interactive {
+                eprintln!();
+            }
+            Ok(session.finish(output?)?)
+        }
+    }
 }
 
 fn run_script(session: &mut Session, script: &PathBuf, json: bool) -> Result<ExitCode> {
@@ -236,14 +363,45 @@ fn print(json: bool, outcome: &Outcome) {
             r.volume_mm3 / 1000.0,
             r.topology.shells
         );
+        if let Some(w) = &r.wall {
+            println!(
+                "      walls: thinnest {:.2} mm; {:.1}% thinner than {} mm",
+                w.thinnest_mm,
+                w.thin_fraction * 100.0,
+                w.min_wall_mm
+            );
+        }
         for issue in &r.issues {
             println!("      - {issue}");
+        }
+        for warning in &r.warnings {
+            println!("      ! {warning}");
         }
     }
     for (i, r) in outcome.repairs.iter().enumerate() {
         println!(
-            "  repair {i}: removed {} zero-area and {} duplicate triangles, flipped {}",
-            r.removed_degenerate, r.removed_duplicates, r.flipped_triangles
+            "  repair {i}: removed {} zero-area and {} duplicate triangles, flipped {}, \
+             filled {} hole(s), removed {} small piece(s)",
+            r.removed_degenerate,
+            r.removed_duplicates,
+            r.flipped_triangles,
+            r.holes_filled,
+            r.removed_shells
+        );
+    }
+    for a in &outcome.assets {
+        let latest = a.latest();
+        println!(
+            "  {} ({} version(s)){}",
+            a.name,
+            a.versions.len(),
+            latest.map_or(String::new(), |v| {
+                let [w, d, h] = v.size_mm;
+                format!(
+                    ", latest {w:.0} × {d:.0} × {h:.0} mm, {} triangles",
+                    v.triangles
+                )
+            })
         );
     }
 }

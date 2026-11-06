@@ -141,7 +141,11 @@ const TETS: [[usize; 4]; 6] = [
 
 /// Marching tetrahedra over `field`, emitting the zero level set wound to face
 /// toward positive values.
-fn march(field: &[f32], [nx, ny, nz]: [usize; 3], at: &dyn Fn(usize, usize, usize) -> Vec3) -> Mesh {
+fn march(
+    field: &[f32],
+    [nx, ny, nz]: [usize; 3],
+    at: &dyn Fn(usize, usize, usize) -> Vec3,
+) -> Mesh {
     let id = |i: usize, j: usize, k: usize| (i + nx * (j + ny * k)) as u32;
     let mut mesh = Mesh::default();
     let mut edge_vertex: HashMap<(u32, u32), u32> = HashMap::new();
@@ -233,9 +237,8 @@ mod tests {
 
     #[test]
     fn thin_models_cannot_be_hollowed() {
-        let plate = primitives::cube(1.0).transformed(glam::Mat4::from_scale(Vec3::new(
-            0.02, 0.002, 0.02,
-        )));
+        let plate =
+            primitives::cube(1.0).transformed(glam::Mat4::from_scale(Vec3::new(0.02, 0.002, 0.02)));
         assert!(cavity(&plate, 0.002, None).is_err());
     }
 }

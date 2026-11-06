@@ -9,7 +9,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use hub_core::engine::{MeshOp, MeshTools};
 use hub_core::scene::{Material, Object, ObjectId, Transform};
@@ -111,7 +111,8 @@ impl Blender {
         let input_path = dir.join("input.glb");
         let output_path = dir.join("output.glb");
         let write = |path: &Path, bytes: &[u8]| {
-            std::fs::write(path, bytes).map_err(|e| format!("could not write {}: {e}", path.display()))
+            std::fs::write(path, bytes)
+                .map_err(|e| format!("could not write {}: {e}", path.display()))
         };
         write(&script, SCRIPT.as_bytes())?;
         if let Some(mesh) = input {
@@ -136,8 +137,14 @@ impl Blender {
         let mut args: Vec<OsString> = Vec::new();
         if !self.python_module {
             args.extend(
-                ["--background", "--factory-startup", "--python-exit-code", "3", "--python"]
-                    .map(OsString::from),
+                [
+                    "--background",
+                    "--factory-startup",
+                    "--python-exit-code",
+                    "3",
+                    "--python",
+                ]
+                .map(OsString::from),
             );
         }
         args.extend([script.into_os_string(), "--".into(), job.into_os_string()]);
@@ -202,13 +209,57 @@ impl MeshTools for Blender {
                 }
                 self.process("voxel_remesh", mesh, &json!({ "voxel": voxel }))
             }
-            MeshOp::Decimate { ratio } => self.process("decimate", mesh, &json!({ "ratio": ratio })),
+            MeshOp::Decimate { ratio } => {
+                self.process("decimate", mesh, &json!({ "ratio": ratio }))
+            }
             MeshOp::UvUnwrap { angle_deg, margin } => self.process(
                 "uv_unwrap",
                 mesh,
                 &json!({ "angle_deg": angle_deg, "margin": margin }),
             ),
         }
+    }
+}
+
+/// A [`Blender`] found on first use, so front ends can start instantly and a
+/// missing Blender only matters to the commands that need it. A failed search
+/// is retried next time, so installing Blender needs no restart.
+#[derive(Debug, Default)]
+pub struct LazyBlender {
+    found: Mutex<Option<Blender>>,
+}
+
+impl LazyBlender {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self) -> Result<Blender, String> {
+        let mut found = self
+            .found
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(b) = found.as_ref() {
+            return Ok(b.clone());
+        }
+        let b = Blender::locate()?;
+        tracing::info!(version = b.version(), program = %b.program().display(), "found Blender");
+        *found = Some(b.clone());
+        Ok(b)
+    }
+}
+
+impl MeshTools for LazyBlender {
+    fn describe(&self) -> String {
+        self.found
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map_or_else(|| "Blender".to_owned(), MeshTools::describe)
+    }
+
+    fn apply(&self, mesh: &Mesh, op: MeshOp) -> Result<Mesh, String> {
+        self.get()?.apply(mesh, op)
     }
 }
 
@@ -219,7 +270,11 @@ fn candidates() -> Vec<PathBuf> {
         out.push(PathBuf::from(p));
         return out;
     }
-    let exe = if cfg!(windows) { "blender.exe" } else { "blender" };
+    let exe = if cfg!(windows) {
+        "blender.exe"
+    } else {
+        "blender"
+    };
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
             let p = dir.join(exe);

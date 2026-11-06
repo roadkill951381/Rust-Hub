@@ -105,11 +105,15 @@ pub type Progress<'a> = &'a (dyn Fn(f32, &str) + Sync);
 
 /// Makes 3D models.
 pub trait Generator: Send + Sync + fmt::Debug {
-    /// Where the generator runs, for messages, e.g. "http://127.0.0.1:8765".
+    /// Where the generator runs, for messages, e.g. `http://127.0.0.1:8765`.
     fn describe(&self) -> String;
 
     /// Generates one model, reporting progress along the way. Blocks until done.
-    fn generate(&self, request: &GenerateRequest, progress: Progress<'_>) -> Result<Generated, String>;
+    fn generate(
+        &self,
+        request: &GenerateRequest,
+        progress: Progress<'_>,
+    ) -> Result<Generated, String>;
 }
 
 /// The engines available to a session. Cheap to clone.
