@@ -1,0 +1,26 @@
+[package]
+name = "hub-core"
+description = "Rust-Hub core: scene model, edit commands with undo, import/export and print checks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+glam.workspace = true
+gltf.workspace = true
+quick-xml.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+stl_io.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+stl_io.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
