@@ -306,6 +306,26 @@ pub struct RigArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SharpenFaceArgs {
+    /// Absolute path of a rigged, textured character (.glb), e.g. from rig.
+    pub model: PathBuf,
+    /// Absolute path of the portrait (PNG or JPEG) whose face to keep.
+    pub face: PathBuf,
+    /// Absolute path to write the result (.glb).
+    pub output: PathBuf,
+    /// Who it is, e.g. the prompt the character was made from.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// How much of the close-up to redraw, 0 to 1 (0.55 by default): more is
+    /// sharper and more like the portrait, less keeps the eyes and mouth
+    /// exactly where the model has them.
+    #[serde(default)]
+    pub repaint: Option<f32>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SaveAssetArgs {
     pub name: String,
     #[serde(default)]
@@ -717,6 +737,25 @@ impl HubServer {
             output: a.output,
             triangles: a.triangles,
             materials: a.materials,
+        };
+        self.run_job(command, context).await
+    }
+
+    #[tool(
+        description = "Paint a sharp face onto a rigged, textured character (.glb, as rig writes it). Blender renders the head close up, ComfyUI redraws that render with the face in a portrait (FLUX with PuLID), and Blender paints it back onto the texture, so the face is crisp and like the portrait while the skeleton, animations and the rest of the texture stay as they are. generate does this by itself when given both face and rig_like. Writes output and adds it to the scene."
+    )]
+    async fn sharpen_face(
+        &self,
+        Parameters(a): Parameters<SharpenFaceArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let command = Command::SharpenFace {
+            model: a.model,
+            face: a.face,
+            output: a.output,
+            prompt: a.prompt,
+            repaint: a.repaint,
+            seed: a.seed,
         };
         self.run_job(command, context).await
     }

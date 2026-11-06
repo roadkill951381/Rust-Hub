@@ -131,6 +131,28 @@ enum Cmd {
         #[arg(long)]
         materials: Option<String>,
     },
+    /// Paint a sharp face onto a rigged character (.glb, as `rig` writes it):
+    /// Blender renders the head close up, ComfyUI redraws it with the face in
+    /// a portrait (FLUX with PuLID), and Blender paints it onto the texture.
+    SharpenFace {
+        /// The rigged, textured character (.glb).
+        model: PathBuf,
+        /// The portrait whose face to keep (PNG or JPEG).
+        #[arg(long)]
+        face: PathBuf,
+        /// Where to write the result (.glb).
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Who it is, e.g. the prompt the character was made from.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// How much of the close-up to redraw, 0 to 1 (0.55 by default):
+        /// more is sharper and more like the portrait.
+        #[arg(long)]
+        repaint: Option<f32>,
+        #[arg(long)]
+        seed: Option<u64>,
+    },
     /// List the asset library, optionally only names containing QUERY.
     Assets { query: Option<String> },
     /// Render a model to a PNG with the viewport renderer.
@@ -348,6 +370,27 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     output,
                     triangles,
                     materials,
+                },
+            )?,
+        ),
+        Cmd::SharpenFace {
+            model,
+            face,
+            output,
+            prompt,
+            repaint,
+            seed,
+        } => print(
+            json,
+            &run_with_progress(
+                &mut session,
+                Command::SharpenFace {
+                    model,
+                    face,
+                    output,
+                    prompt,
+                    repaint,
+                    seed,
                 },
             )?,
         ),

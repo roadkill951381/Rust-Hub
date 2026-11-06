@@ -32,6 +32,10 @@ pub const FLUX_DEV_SHEET: &str = "flux-dev-sheet";
 pub const FLUX_PULID: &str = "flux-pulid";
 /// [`FLUX_PULID`] as a turnaround sheet.
 pub const FLUX_PULID_SHEET: &str = "flux-pulid-sheet";
+/// A sharp, evenly lit close-up of a face with the likeness of `{{image}}`,
+/// drawn over a render of a model's head so it can be painted back onto
+/// the model's texture.
+pub const FLUX_PULID_FACE: &str = "flux-pulid-face";
 
 /// Words added to a prompt so the picture suits a shape model: one whole
 /// object, centred, on a plain background.
@@ -50,6 +54,13 @@ const FIGURE_STYLE: &str = "full colour photo, full-length shot of the whole bod
 const SHEET_STYLE: &str = "character turnaround reference sheet, the same character shown \
                            three times side by side, evenly spaced and not overlapping: \
                            front view, side view facing left, back view";
+
+/// Words for a face close-up that is painted back onto a model's texture:
+/// lit flat, so no light or shadow gets baked into the skin.
+const FACE_STYLE: &str = "close-up colour photo of the head and face, looking straight at the \
+                          camera, neutral expression, mouth closed, eyes open, sharp focus, \
+                          detailed skin, eyes and eyelashes, hair kept off the face, plain \
+                          light grey background, flat even studio lighting, no shadows";
 
 /// How much of a pose guide a picture repaints unless told otherwise: enough
 /// to turn a grey mannequin into a dressed person in colour (0.82 left the
@@ -109,8 +120,8 @@ impl Workflow {
             });
             format!(
                 "no ComfyUI workflow called {name:?}: the built-in ones are {FLUX_SCHNELL}, \
-                 {FLUX_DEV}, {FLUX_DEV_SHEET}, {FLUX_PULID}, {FLUX_PULID_SHEET} and \
-                 {HUNYUAN3D_21}{folder}"
+                 {FLUX_DEV}, {FLUX_DEV_SHEET}, {FLUX_PULID}, {FLUX_PULID_SHEET}, \
+                 {FLUX_PULID_FACE} and {HUNYUAN3D_21}{folder}"
             )
         })?;
         Ok(Self {
@@ -277,12 +288,18 @@ fn builtin(name: &str) -> Option<Value> {
         width: 1536,
         height: 768,
     };
+    let face = Shot {
+        style: format!(", {FACE_STYLE}"),
+        width: 1024,
+        height: 1024,
+    };
     match name {
         FLUX_SCHNELL => Some(flux("flux1-schnell-Q8_0.gguf", 4, None, &object)),
         FLUX_DEV => Some(flux("flux1-dev-Q8_0.gguf", 20, Some(3.5), &object)),
         FLUX_DEV_SHEET => Some(flux("flux1-dev-Q8_0.gguf", 24, Some(3.5), &sheet)),
         FLUX_PULID => Some(with_pulid(flux(PULID_UNET, 24, Some(3.5), &figure))),
         FLUX_PULID_SHEET => Some(with_pulid(flux(PULID_UNET, 24, Some(3.5), &sheet))),
+        FLUX_PULID_FACE => Some(with_pulid(flux(PULID_UNET, 24, Some(3.5), &face))),
         HUNYUAN3D_21 => Some(hunyuan3d_21()),
         _ => None,
     }
@@ -320,8 +337,9 @@ const FLUXES: &[&str] = &[
     FLUX_DEV_SHEET,
     FLUX_PULID,
     FLUX_PULID_SHEET,
+    FLUX_PULID_FACE,
 ];
-const PULIDS: &[&str] = &[FLUX_PULID, FLUX_PULID_SHEET];
+const PULIDS: &[&str] = &[FLUX_PULID, FLUX_PULID_SHEET, FLUX_PULID_FACE];
 
 /// Every file the built-in workflows load.
 pub const MODEL_FILES: &[ModelFile] = &[
@@ -655,6 +673,7 @@ mod tests {
             FLUX_DEV_SHEET,
             FLUX_PULID,
             FLUX_PULID_SHEET,
+            FLUX_PULID_FACE,
             HUNYUAN3D_21,
         ] {
             let graph = builtin(name).unwrap().to_string();

@@ -184,7 +184,9 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         size_mm: Option<f32>,
         /// A portrait (PNG or JPEG) whose face the character keeps; the
-        /// picture is drawn in ComfyUI with PuLID.
+        /// picture is drawn in ComfyUI with PuLID. With `rig_like`, a sharp
+        /// close-up of the face is then painted onto the texture too (see
+        /// `SharpenFace`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face: Option<PathBuf>,
         /// Draw the front, side and back, and build the shape from all of
@@ -225,6 +227,27 @@ pub enum Command {
         /// Start of the material names, e.g. `surv_mei`; the reference's by default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         materials: Option<String>,
+    },
+    /// Paint a sharp face onto a rigged, textured character (.glb, as `Rig`
+    /// writes it): Blender renders its head close up, ComfyUI redraws that
+    /// render with the likeness of `face` (FLUX with PuLID), and Blender
+    /// paints the result back onto the texture. Writes `output` and adds it
+    /// to the scene to look at.
+    SharpenFace {
+        model: PathBuf,
+        /// The portrait (PNG or JPEG) whose face to keep.
+        face: PathBuf,
+        output: PathBuf,
+        /// Who it is, e.g. the prompt the character was made from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+        /// How much of the render to redraw, from 0 to 1: more is sharper
+        /// and more like the portrait, less keeps the eyes and mouth exactly
+        /// where the model has them. 0.55 by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repaint: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed: Option<u64>,
     },
     /// Save objects as a new version of a library asset.
     SaveAsset {
@@ -293,6 +316,7 @@ impl Command {
                 | Command::UvUnwrap { .. }
                 | Command::Generate { .. }
                 | Command::Rig { .. }
+                | Command::SharpenFace { .. }
         )
     }
 
@@ -317,6 +341,7 @@ impl Command {
             Command::UvUnwrap { .. } => "UV unwrap",
             Command::Generate { .. } => "Generate",
             Command::Rig { .. } => "Rig",
+            Command::SharpenFace { .. } => "Sharpen face",
             Command::SaveAsset { .. } => "Save asset",
             Command::LoadAsset { .. } => "Load asset",
             Command::ListAssets { .. } => "List assets",

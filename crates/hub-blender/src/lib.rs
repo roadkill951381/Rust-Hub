@@ -265,6 +265,20 @@ impl MeshTools for Blender {
     }
 }
 
+/// The side of the face close-up, in pixels: what FLUX draws at.
+const FACE_VIEW_SIZE: u32 = 1024;
+
+/// An absolute path for a file to write, with its folder made.
+fn absolute_dir(path: &Path) -> Result<std::path::PathBuf, String> {
+    let path = std::path::absolute(path)
+        .map_err(|e| format!("could not resolve {}: {e}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    Ok(path)
+}
+
 impl Rigger for Blender {
     fn describe(&self) -> String {
         format!("Blender {}", self.version)
@@ -316,6 +330,38 @@ impl Rigger for Blender {
         )?;
         Ok(())
     }
+
+    fn face_view(&self, model: &Path, output: &Path) -> Result<(), String> {
+        let output = absolute_dir(output)?;
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        self.run(
+            dir.path(),
+            "face_view",
+            Input::File(model),
+            Some(&output),
+            &json!({"size": FACE_VIEW_SIZE}),
+        )?;
+        Ok(())
+    }
+
+    fn project_face(&self, model: &Path, picture: &Path, output: &Path) -> Result<usize, String> {
+        let output = absolute_dir(output)?;
+        let picture = std::path::absolute(picture)
+            .map_err(|e| format!("could not resolve {}: {e}", picture.display()))?;
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let report = self.run(
+            dir.path(),
+            "project_face",
+            Input::File(model),
+            Some(&output),
+            &json!({"picture": picture}),
+        )?;
+        Ok(report
+            .rest
+            .get("painted_texels")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX)))
+    }
 }
 
 /// A [`Blender`] found on first use, so front ends can start instantly and a
@@ -363,6 +409,14 @@ impl Rigger for LazyBlender {
         output: &Path,
     ) -> Result<(), String> {
         self.get()?.pose_views(reference, sheet, textured, output)
+    }
+
+    fn face_view(&self, model: &Path, output: &Path) -> Result<(), String> {
+        self.get()?.face_view(model, output)
+    }
+
+    fn project_face(&self, model: &Path, picture: &Path, output: &Path) -> Result<usize, String> {
+        self.get()?.project_face(model, picture, output)
     }
 }
 

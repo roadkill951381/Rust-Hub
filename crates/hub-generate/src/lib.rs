@@ -373,6 +373,7 @@ impl Generator for Client {
                 face: request.face.clone(),
                 multiview: result.views.len() > 1,
                 rig: None,
+                face_close_up: None,
             },
         })
     }

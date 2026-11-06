@@ -1450,6 +1450,7 @@ name = "hub-blender"
 version = "0.1.0"
 dependencies = [
  "hub-core",
+ "image",
  "serde",
  "serde_json",
  "tempfile",

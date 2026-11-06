@@ -116,8 +116,8 @@ unload its models. The hub's ComfyUI writes to `comfyui.log` in the
 
 Built-in workflows: `flux-schnell` and `flux-dev` (FLUX GGUF through
 ComfyUI-GGUF, with `t5xxl_fp8_e4m3fn`, `clip_l` and `ae`), `flux-dev-sheet`
-(a front, side and back turnaround), `flux-pulid` and `flux-pulid-sheet`
-(keep a face; need the ComfyUI_PuLID_Flux_ll nodes with `insightface`,
+(a front, side and back turnaround), `flux-pulid`, `flux-pulid-sheet` and
+`flux-pulid-face` (keep a face; the last redraws a face close-up; need the ComfyUI_PuLID_Flux_ll nodes with `insightface`,
 `facexlib`, `onnxruntime-gpu` and `facenet-pytorch --no-deps` in ComfyUI's
 Python, plus `flux1-dev-Q5_K_S.gguf` and `pulid_flux_v0.9.1.safetensors` in
 `models/pulid`), and `hunyuan3d-2.1`
@@ -160,6 +160,14 @@ hub generate "Mei, a young woman survivor, red jacket, cargo trousers, boots" \
    reference's skeleton, inverse bind matrices and animations byte for byte.
    Skin is split from clothes by colour into `<materials>.body` and
    `<materials>.clothes`.
+4. The shape model paints the whole body from a few small views, so the face
+   comes out soft. Blender renders the rigged head close up and unlit, FLUX
+   with PuLID redraws that render sharply with the portrait's face
+   (repainting 0.55 of it, so the eyes and mouth stay put), and Blender
+   paints the result back onto the texture through the same camera, fading
+   it out toward the sides of the head and the neck. The result is
+   `<name>-rigged-face.glb`; if this step fails, the rigged model is kept and
+   the report says why.
 
 To remake a character you already have, add `--keep-look`: the guide is the
 reference with its own colours and clothes, and the picture repaints less of
@@ -167,8 +175,11 @@ it (0.7 instead of 0.88; set `--repaint` to choose), so the arms and outfit
 stay where they are while the portrait sets the face.
 
 `hub rig model.glb --like character.glb -o rigged.glb` runs step 3 alone on a
-model you already have. In the app these options are under Generate >
-Character; Claude has them on the `generate` and `rig` tools.
+model you already have, and `hub sharpen-face rigged.glb --face portrait.png
+--prompt "..." -o faced.glb` runs step 4 alone (`--repaint` from 0 to 1: more
+is sharper and more like the portrait, less keeps the model's features where
+they are). In the app these options are under Generate > Character; Claude
+has them on the `generate`, `rig` and `sharpen_face` tools.
 
 ### Keep everything up to date
 

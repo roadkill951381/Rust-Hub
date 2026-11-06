@@ -149,21 +149,33 @@ bones = {**BONES, **arm_bones(model_angle)}
 me = capsule_body(bones, scale=1.15)
 obj = bpy.data.objects.new("generated", me)
 bpy.context.scene.collection.objects.link(obj)
-img = bpy.data.images.new("tex", 64, 64)
+img = bpy.data.images.new("tex", 256, 256)
 px = []
-for _y in range(64):
-    for x in range(64):
-        px += [0.80, 0.60, 0.50, 1.0] if x < 32 else [0.12, 0.12, 0.14, 1.0]
+for _y in range(256):
+    for x in range(256):
+        px += [0.80, 0.60, 0.50, 1.0] if x < 128 else [0.12, 0.12, 0.14, 1.0]
 img.pixels = px
 img.pack()
 obj.data.materials.append(material("generated", image=img))
 uv = me.uv_layers.new()
+
+
+def clip(t):
+    return min(max(t, 0.0), 1.0)
+
+
 for poly in me.polygons:
     z = sum(me.vertices[v].co.z for v in poly.vertices) / len(poly.vertices)
     xs = sum(me.vertices[v].co.x for v in poly.vertices) / len(poly.vertices)
-    skin = z > 1.5 or abs(xs) > 0.55
-    for li in poly.loop_indices:
-        uv.data[li].uv = (0.25 if skin else 0.75, 0.5)
+    for li, v in zip(poly.loop_indices, poly.vertices, strict=True):
+        co = me.vertices[v].co
+        if z > 1.5:
+            # The head gets its own texels, the front and back side by side,
+            # so a face can be painted onto it.
+            u = (0.0 if poly.normal.y < 0 else 0.25) + 0.02 + 0.21 * clip((co.x + 0.15) / 0.3)
+            uv.data[li].uv = (u, 0.02 + 0.96 * clip((co.z - 1.4) / 0.45))
+        else:
+            uv.data[li].uv = (0.24 if abs(xs) > 0.55 else 0.75, 0.5)
 if turn:
     me.transform(Matrix.Rotation(math.pi, 4, "Z"))
 # Generators make models of arbitrary size; shrink it to a unit-ish box.

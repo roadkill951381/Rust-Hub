@@ -171,4 +171,44 @@ fn a_generated_model_is_rigged_like_the_reference() {
     assert_eq!(&png[1..4], b"PNG");
     let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
     assert_eq!((size(16), size(20)), (1536, 768));
+
+    // A sharper face: the head close up, a "redrawn" picture with a blue
+    // patch in the middle of the face, painted back onto the texture.
+    let view = dir.path().join("face-view.png");
+    blender.face_view(&output, &view).unwrap();
+    let mut picture = image::open(&view).unwrap().to_rgb8();
+    assert_eq!(picture.dimensions(), (1024, 1024));
+    let skin = *picture.get_pixel(512, 560);
+    assert!(
+        skin[0] > skin[2] + 40,
+        "the middle of the face is skin: {skin:?}"
+    );
+    for y in 400..520 {
+        for x in 450..574 {
+            picture.put_pixel(x, y, image::Rgb([30, 60, 200]));
+        }
+    }
+    let redrawn = dir.path().join("face-redrawn.png");
+    picture.save(&redrawn).unwrap();
+    let painted = dir.path().join("rigged-face.glb");
+    let texels = blender.project_face(&output, &redrawn, &painted).unwrap();
+    assert!(texels > 100, "painted {texels} texels");
+    assert_eq!(
+        skeleton(&after),
+        skeleton(&glb_json(&painted)),
+        "painting keeps the skeleton"
+    );
+    let again = dir.path().join("face-again.png");
+    blender.face_view(&painted, &again).unwrap();
+    let again = image::open(&again).unwrap().to_rgb8();
+    let patch = *again.get_pixel(512, 460);
+    assert!(
+        patch[2] > patch[0] + 80,
+        "the patch is on the face now: {patch:?}"
+    );
+    let below = *again.get_pixel(512, 600);
+    assert!(
+        below[0] > below[2] + 40,
+        "the rest of the face is still skin: {below:?}"
+    );
 }

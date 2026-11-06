@@ -18,12 +18,14 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hub_core::engine::{GenerateRequest, Generated, GenerationInfo, Generator, Progress};
+use hub_core::engine::{
+    FaceRequest, GenerateRequest, Generated, GenerationInfo, Generator, Progress,
+};
 use serde_json::{Value, json};
 
 pub use workflows::{
-    FLUX_DEV, FLUX_DEV_SHEET, FLUX_PULID, FLUX_PULID_SHEET, FLUX_SCHNELL, HUNYUAN3D_21, Inputs,
-    MODEL_FILES, Makes, ModelFile, POSE_DENOISE, Workflow,
+    FLUX_DEV, FLUX_DEV_SHEET, FLUX_PULID, FLUX_PULID_FACE, FLUX_PULID_SHEET, FLUX_SCHNELL,
+    HUNYUAN3D_21, Inputs, MODEL_FILES, Makes, ModelFile, POSE_DENOISE, Workflow,
 };
 
 /// Extra ComfyUI flags for jobs that keep a face: PuLID with FLUX fills a
@@ -703,6 +705,27 @@ impl Generator for ComfyUi {
                 ..GenerationInfo::default()
             },
         })
+    }
+
+    /// FLUX with PuLID over the close-up ([`FLUX_PULID_FACE`]).
+    fn redraw_face(
+        &self,
+        request: &FaceRequest,
+        progress: Progress<'_>,
+    ) -> Result<PathBuf, String> {
+        let pose = Pose {
+            guide: &request.render,
+            repaint: request.repaint,
+        };
+        self.make_picture(
+            &request.prompt,
+            Some(&request.face),
+            Some(pose),
+            request.seed.unwrap_or_else(random_seed),
+            Some(FLUX_PULID_FACE),
+            progress,
+        )
+        .map(|(picture, _)| picture)
     }
 }
 

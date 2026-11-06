@@ -269,6 +269,41 @@ def clay_figure(figure):
         poly.material_index = 0
 
 
+def soft_studio(scene, width, height, samples, output):
+    """A sun and a light grey backdrop that lights the subject only softly,
+    so its own colours are not washed out; Cycles on the CPU, writing PNG."""
+    sun = bpy.data.objects.new("sun", bpy.data.lights.new("sun", "SUN"))
+    sun.data.energy = 2.0
+    sun.rotation_euler = (math.radians(50), 0.0, math.radians(-30))
+    scene.collection.objects.link(sun)
+    world = bpy.data.worlds.new("world")
+    world.use_nodes = True
+    nodes, links = world.node_tree.nodes, world.node_tree.links
+    seen = nodes["Background"]
+    seen.inputs["Color"].default_value = (0.8, 0.8, 0.8, 1.0)
+    lit = nodes.new("ShaderNodeBackground")
+    lit.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    lit.inputs["Strength"].default_value = 0.35
+    path = nodes.new("ShaderNodeLightPath")
+    mix = nodes.new("ShaderNodeMixShader")
+    links.new(path.outputs["Is Camera Ray"], mix.inputs["Fac"])
+    links.new(lit.outputs["Background"], mix.inputs[1])
+    links.new(seen.outputs["Background"], mix.inputs[2])
+    links.new(mix.outputs["Shader"], nodes["World Output"].inputs["Surface"])
+    scene.world = world
+
+    scene.render.engine = "CYCLES"
+    scene.cycles.device = "CPU"
+    scene.cycles.samples = samples
+    scene.cycles.use_denoising = False
+    scene.view_settings.view_transform = "Standard"
+    scene.render.resolution_x, scene.render.resolution_y = width, height
+    scene.render.resolution_percentage = 100
+    scene.render.image_settings.file_format = "PNG"
+    scene.render.image_settings.color_mode = "RGB"
+    scene.render.filepath = output
+
+
 def pose_views(job):
     """Renders a rigged character in its rest pose on a light grey
     background, as a plain grey figure or (``textured``) with its own
@@ -325,41 +360,309 @@ def pose_views(job):
     camera.data.clip_end = 100.0
     scene.camera = camera
 
-    sun = bpy.data.objects.new("sun", bpy.data.lights.new("sun", "SUN"))
-    sun.data.energy = 2.0
-    sun.rotation_euler = (math.radians(50), 0.0, math.radians(-30))
-    scene.collection.objects.link(sun)
-    # A light grey backdrop that lights the figure only softly, so its own
-    # colours are not washed out.
-    world = bpy.data.worlds.new("world")
-    world.use_nodes = True
-    nodes, links = world.node_tree.nodes, world.node_tree.links
-    seen = nodes["Background"]
-    seen.inputs["Color"].default_value = (0.8, 0.8, 0.8, 1.0)
-    lit = nodes.new("ShaderNodeBackground")
-    lit.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-    lit.inputs["Strength"].default_value = 0.35
-    path = nodes.new("ShaderNodeLightPath")
-    mix = nodes.new("ShaderNodeMixShader")
-    links.new(path.outputs["Is Camera Ray"], mix.inputs["Fac"])
-    links.new(lit.outputs["Background"], mix.inputs[1])
-    links.new(seen.outputs["Background"], mix.inputs[2])
-    links.new(mix.outputs["Shader"], nodes["World Output"].inputs["Surface"])
-    scene.world = world
-
-    scene.render.engine = "CYCLES"
-    scene.cycles.device = "CPU"
-    scene.cycles.samples = int(params.get("samples", 16))
-    scene.cycles.use_denoising = False
-    scene.view_settings.view_transform = "Standard"
-    scene.render.resolution_x, scene.render.resolution_y = width, height
-    scene.render.resolution_percentage = 100
-    scene.render.image_settings.file_format = "PNG"
-    scene.render.image_settings.color_mode = "RGB"
-    scene.render.filepath = job["output"]
+    soft_studio(scene, width, height, int(params.get("samples", 16)), job["output"])
     bpy.ops.render.render(write_still=True)
     del np
     return {"width": width, "height": height, "views": len(turns)}
+
+
+# --- A sharper face -----------------------------------------------------------
+# The shape model paints the whole body from a few small views, so the face
+# comes out soft. ``face_view`` renders the rigged model's head close up, a
+# picture model redraws that render sharply, and ``project_face`` paints the
+# redrawn picture back onto the texture through the same camera, so every
+# texel lands where it was rendered from.
+
+
+def bone_named(arm, name):
+    return next(
+        (b for b in arm.data.bones if b.name.lower().replace("mixamorig:", "") == name), None
+    )
+
+
+def head_frame(arm, pts):
+    """The square that frames the head from the front, in the x/z plane:
+    (centre x, centre z, side, neck z). It runs from the base of the neck to
+    the top of the head, as wide as the head and hair."""
+    import numpy as np
+
+    head = bone_named(arm, "head")
+    if head is None:
+        raise ValueError("the model has no Head bone to find the face by")
+    mw = arm.matrix_world
+    base = mw @ head.head_local
+    neck = bone_named(arm, "neck")
+    bottom = (mw @ neck.head_local).z if neck else base.z - head.length * 0.5
+    above = pts[pts[:, 2] > base.z]
+    top = float(above[:, 2].max()) if len(above) else (mw @ head.tail_local).z
+    near = above[np.abs(above[:, 0] - base.x) < (top - bottom)]
+    half = float(np.abs(near[:, 0] - base.x).max()) if len(near) else head.length
+    side = max(top - bottom, 2 * half) * 1.15
+    return float(base.x), (top + bottom) / 2, side, bottom
+
+
+def flat_colours(obj):
+    """Shows each material's base colour as it is, unlit, so a render of the
+    model is its texture as seen from the camera."""
+    for slot in obj.material_slots:
+        mat = slot.material
+        if not mat or not mat.use_nodes:
+            continue
+        nodes, links = mat.node_tree.nodes, mat.node_tree.links
+        bsdf = next((n for n in nodes if n.type == "BSDF_PRINCIPLED"), None)
+        out = next((n for n in nodes if n.type == "OUTPUT_MATERIAL"), None)
+        if bsdf is None or out is None:
+            continue
+        emit = nodes.new("ShaderNodeEmission")
+        colour = bsdf.inputs["Base Color"]
+        if colour.links:
+            links.new(colour.links[0].from_socket, emit.inputs["Color"])
+        else:
+            emit.inputs["Color"].default_value = colour.default_value
+        links.new(emit.outputs["Emission"], out.inputs["Surface"])
+
+
+def face_camera(scene, cx, cz, side):
+    camera = bpy.data.objects.new("camera", bpy.data.cameras.new("camera"))
+    scene.collection.objects.link(camera)
+    camera.data.type = "ORTHO"
+    camera.data.ortho_scale = side
+    camera.location = (cx, -10.0, cz)
+    camera.rotation_euler = (math.pi / 2, 0.0, 0.0)
+    camera.data.clip_end = 100.0
+    scene.camera = camera
+
+
+def face_view(job):
+    """Renders a rigged model's head from the front, close up and unlit, on
+    a light grey background."""
+    params = job.get("params", {})
+    size = int(params.get("size", 1024))
+    arm, skinned = load_reference(job["input"])
+    figure = evaluated_copy(skinned, arm)
+    for o in list(bpy.context.scene.objects):
+        if o not in (figure, arm):
+            bpy.data.objects.remove(o, do_unlink=True)
+    arm.hide_render = True
+    cx, cz, side, _neck = head_frame(arm, mesh_points(figure))
+    flat_colours(figure)
+    scene = bpy.context.scene
+    face_camera(scene, cx, cz, side)
+    soft_studio(scene, size, size, int(params.get("samples", 16)), job["output"])
+    # Sharp pixels: the picture model redraws them, and they map back to texels.
+    scene.cycles.filter_width = 1.0
+    bpy.ops.render.render(write_still=True)
+    return {"width": size, "height": size, "centre": [cx, cz], "side": side}
+
+
+def image_pixels(path):
+    """An image file as an (h, w, 4) float array, bottom row first."""
+    import numpy as np
+
+    image = bpy.data.images.load(path)
+    w, h = image.size
+    px = np.empty(w * h * 4, dtype=np.float32)
+    image.pixels.foreach_get(px)
+    bpy.data.images.remove(image)
+    return px.reshape(h, w, 4)
+
+
+def bilinear(image, x, y):
+    """Samples an (h, w, c) array at pixel coordinates (centres on integers)."""
+    import numpy as np
+
+    h, w = image.shape[:2]
+    x = np.clip(x, 0, w - 1)
+    y = np.clip(y, 0, h - 1)
+    x0 = np.minimum(np.floor(x).astype(np.int64), w - 2) if w > 1 else np.zeros_like(x, int)
+    y0 = np.minimum(np.floor(y).astype(np.int64), h - 2) if h > 1 else np.zeros_like(y, int)
+    fx, fy = (x - x0)[:, None], (y - y0)[:, None]
+    x1, y1 = np.minimum(x0 + 1, w - 1), np.minimum(y0 + 1, h - 1)
+    top = image[y0, x0] * (1 - fx) + image[y0, x1] * fx
+    bottom = image[y1, x0] * (1 - fx) + image[y1, x1] * fx
+    return top * (1 - fy) + bottom * fy
+
+
+def smoothstep(lo, hi, x):
+    import numpy as np
+
+    t = np.clip((x - lo) / (hi - lo), 0.0, 1.0)
+    return t * t * (3 - 2 * t)
+
+
+#: Where, across a texel, ``project_face`` samples the picture.
+SUBSAMPLES = (-0.375, -0.125, 0.125, 0.375)
+
+
+def project_face(job):
+    """Paints a picture of the face, drawn over ``face_view``'s render, onto
+    a rigged model's texture: each texel on the front of the head takes the
+    picture's colour where the camera saw it, fading out toward the sides of
+    the head, the neck and the edges of the picture. Writes the GLB again
+    with the new texture; everything else is copied as it is."""
+    import numpy as np
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
+
+    params = job.get("params", {})
+    strength = float(params.get("strength", 1.0))
+    arm, skinned = load_reference(job["input"])
+    figure = evaluated_copy(skinned, arm)
+    texture = base_texture(figure)
+    if texture is None:
+        raise ValueError("the model has no texture to paint the face onto")
+    picture = image_pixels(params["picture"])[..., :3]
+    pts = mesh_points(figure)
+    cx, cz, side, neck = head_frame(arm, pts)
+
+    mesh = figure.data
+    mesh.calc_loop_triangles()
+    n = len(mesh.loop_triangles)
+    tri_v = np.empty(n * 3, dtype=np.int64)
+    tri_l = np.empty(n * 3, dtype=np.int64)
+    mesh.loop_triangles.foreach_get("vertices", tri_v)
+    mesh.loop_triangles.foreach_get("loops", tri_l)
+    uv = np.empty(len(mesh.loops) * 2, dtype=np.float32)
+    mesh.uv_layers.active.data.foreach_get("uv", uv)
+    normals = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("normal", normals)
+    tri_p = pts[tri_v].reshape(n, 3, 3).astype(np.float64)
+    tri_n = normals.reshape(-1, 3)[tri_v].reshape(n, 3, 3).astype(np.float64)
+    th, tw = texture.shape[:2]
+    # Texel centres on integer coordinates.
+    tri_t = uv.reshape(-1, 2)[tri_l].reshape(n, 3, 2) * (tw, th) - 0.5
+
+    def screen(p):
+        return (p[..., 0] - cx) / side + 0.5, (p[..., 2] - cz) / side + 0.5
+
+    centre = tri_p.mean(axis=1)
+    cross = np.cross(tri_p[:, 1] - tri_p[:, 0], tri_p[:, 2] - tri_p[:, 0])
+    sx, sy = screen(centre)
+    candidates = np.flatnonzero(
+        (sx > 0)
+        & (sx < 1)
+        & (sy > 0)
+        & (sy < 1)
+        & (cross[:, 1] < 0)
+        & (centre[:, 2] > neck - 0.05 * side)
+    )
+    # Seen by the camera: nothing between the triangle and the camera.
+    bvh = BVHTree.FromPolygons(pts.tolist(), tri_v.reshape(-1, 3).tolist())
+    toward = Vector((0.0, -1.0, 0.0))
+    lift = side * 1e-3
+    seen = [bvh.ray_cast(Vector(centre[t]) + toward * lift, toward)[0] is None for t in candidates]
+    candidates = candidates[np.array(seen, dtype=bool)] if len(candidates) else candidates
+
+    weight = np.zeros((th, tw), dtype=np.float32)
+    colour = np.zeros((th, tw, 3), dtype=np.float32)
+    covered = np.zeros((th, tw), dtype=np.int8)
+    ph, pw = picture.shape[:2]
+    for t in candidates:
+        q = tri_t[t]
+        x0, y0 = np.floor(q.min(axis=0) - 1).astype(int)
+        x1, y1 = np.ceil(q.max(axis=0) + 1).astype(int)
+        x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, tw - 1), min(y1, th - 1)
+        if x1 < x0 or y1 < y0:
+            continue
+        gx, gy = np.meshgrid(np.arange(x0, x1 + 1), np.arange(y0, y1 + 1))
+        gx, gy = gx.ravel(), gy.ravel()
+        a, b, c = q
+        area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        if abs(area) < 1e-9:
+            continue
+        bary = np.stack(
+            [
+                ((b[0] - gx) * (c[1] - gy) - (b[1] - gy) * (c[0] - gx)) / area,
+                ((c[0] - gx) * (a[1] - gy) - (c[1] - gy) * (a[0] - gx)) / area,
+                ((a[0] - gx) * (b[1] - gy) - (a[1] - gy) * (b[0] - gx)) / area,
+            ],
+            axis=1,
+        )
+        # Take texels up to a texel outside the edges too, so UV seams and
+        # texture filtering see no line of the old colours.
+        edges = np.linalg.norm(q[[1, 2, 0]] - q[[2, 0, 1]], axis=1)
+        slack = edges / abs(area)
+        inside = np.all(bary > -slack, axis=1)
+        if not inside.any():
+            continue
+        gx, gy, bary = gx[inside], gy[inside], bary[inside]
+        # Texels just outside the triangle carry on its plane; they only
+        # fill in where no triangle covers them itself.
+        rank = np.where(np.all(bary >= 0, axis=1), 2, 1).astype(np.int8)
+        p = bary @ tri_p[t]
+        clipped = np.clip(bary, 0, None)
+        nrm = (clipped / clipped.sum(axis=1, keepdims=True)) @ tri_n[t]
+        nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
+        px, py = screen(p)
+        margin = np.minimum(np.minimum(px, 1 - px), np.minimum(py, 1 - py))
+        w = (
+            smoothstep(0.15, 0.55, -nrm[:, 1])
+            * smoothstep(0.0, 0.08, margin)
+            * smoothstep(neck - 0.05 * side, neck + 0.05 * side, p[:, 2])
+        )
+        held = covered[gy, gx]
+        better = (rank > held) | ((rank == held) & (w > weight[gy, gx]))
+        if not better.any():
+            continue
+        gx, gy, w = gx[better], gy[better], w[better]
+        weight[gy, gx] = w
+        covered[gy, gx] = rank[better]
+        # Average the picture over each texel's footprint, not just its
+        # centre, so a picture finer than the texture does not alias.
+        uv_edges = np.stack([q[1] - q[0], q[2] - q[0]], axis=1)
+        if abs(np.linalg.det(uv_edges)) < 1e-12:
+            continue
+        p_edges = np.stack([tri_p[t][1] - tri_p[t][0], tri_p[t][2] - tri_p[t][0]], axis=1)
+        dp = p_edges @ np.linalg.inv(uv_edges)  # metres per texel along u and v
+        dsx, dsy = dp[0] / side * pw, dp[2] / side * ph  # picture pixels per texel
+        cx_px, cy_px = px[better] * pw - 0.5, py[better] * ph - 0.5
+        total = np.zeros((len(gx), 3), dtype=np.float64)
+        for du in SUBSAMPLES:
+            for dv in SUBSAMPLES:
+                total += bilinear(
+                    picture,
+                    cx_px + du * dsx[0] + dv * dsx[1],
+                    cy_px + du * dsy[0] + dv * dsy[1],
+                )
+        colour[gy, gx] = total / len(SUBSAMPLES) ** 2
+
+    w = (weight * strength)[..., None]
+    texture[..., :3] = texture[..., :3] * (1 - w) + colour * w
+    painted = int(np.count_nonzero(weight > 0.5))
+    if painted == 0:
+        raise ValueError("no part of the face could be seen from the front to paint")
+
+    tmp = job["output"] + ".texture.png"
+    image = bpy.data.images.new("painted", tw, th, alpha=True)
+    image.pixels.foreach_set(np.ascontiguousarray(texture, dtype=np.float32).ravel())
+    image.filepath_raw = tmp
+    image.file_format = "PNG"
+    image.save()
+    with open(tmp, "rb") as f:
+        png = f.read()
+    import os
+
+    os.remove(tmp)
+    replace_texture(job["input"], job["output"], png)
+    return {"painted_texels": painted, "triangles": len(candidates)}
+
+
+def replace_texture(path, output, png):
+    """Copies a GLB with its base colour image(s) replaced by one PNG."""
+    doc, binary = read_glb(path)
+    sources = {
+        doc["textures"][m["pbrMetallicRoughness"]["baseColorTexture"]["index"]]["source"]
+        for m in doc.get("materials", [])
+        if "baseColorTexture" in m.get("pbrMetallicRoughness", {})
+    }
+    replaced = {doc["images"][i]["bufferView"] for i in sources if "bufferView" in doc["images"][i]}
+    out = GlbWriter()
+    for i, view in enumerate(doc.get("bufferViews", [])):
+        data = png if i in replaced else view_bytes(doc, binary, i)
+        out.add(data, view.get("target"), view.get("byteStride"))
+    for i in sources:
+        doc["images"][i]["mimeType"] = "image/png"
+    write_glb(doc, out, output)
 
 
 def body_prefix(meshes):
@@ -907,6 +1210,22 @@ def model_arrays(obj, joint_of):
     }
 
 
+def write_glb(doc, out, output):
+    """Writes a glTF document and a GlbWriter's buffer as one .glb file."""
+    doc["bufferViews"] = out.views
+    doc["buffers"] = [{"byteLength": len(out.blob)}]
+    text = json.dumps(doc, separators=(",", ":")).encode("utf-8")
+    text += b" " * (-len(text) % 4)
+    blob = bytes(out.blob) + b"\x00" * (-len(out.blob) % 4)
+    total = 12 + 8 + len(text) + 8 + len(blob)
+    with open(output, "wb") as f:
+        f.write(struct.pack("<4sII", b"glTF", 2, total))
+        f.write(struct.pack("<I4s", len(text), b"JSON"))
+        f.write(text)
+        f.write(struct.pack("<I4s", len(blob), b"BIN\x00"))
+        f.write(blob)
+
+
 def write_rigged(reference, model_path, output, obj, skin, names):
     import numpy as np
 
@@ -1072,8 +1391,6 @@ def write_rigged(reference, model_path, output, obj, skin, names):
     doc["nodes"] = new_nodes
     doc["meshes"] = [{"name": keep_node["name"], "primitives": primitives}]
     doc["accessors"] = accessors
-    doc["bufferViews"] = out.views
-    doc["buffers"] = [{"byteLength": len(out.blob)}]
     doc["materials"] = materials
     for key, value in (("images", images), ("textures", textures), ("samplers", samplers)):
         if value:
@@ -1084,16 +1401,7 @@ def write_rigged(reference, model_path, output, obj, skin, names):
     for key in ("extensionsUsed", "extensionsRequired"):
         doc.pop(key, None)
 
-    text = json.dumps(doc, separators=(",", ":")).encode("utf-8")
-    text += b" " * (-len(text) % 4)
-    blob = bytes(out.blob) + b"\x00" * (-len(out.blob) % 4)
-    total = 12 + 8 + len(text) + 8 + len(blob)
-    with open(output, "wb") as f:
-        f.write(struct.pack("<4sII", b"glTF", 2, total))
-        f.write(struct.pack("<I4s", len(text), b"JSON"))
-        f.write(text)
-        f.write(struct.pack("<I4s", len(blob), b"BIN\x00"))
-        f.write(blob)
+    write_glb(doc, out, output)
     if data["unweighted"]:
         raise ValueError(f"{data['unweighted']} vertices got no skin weights")
 
@@ -1130,6 +1438,10 @@ def main():
             report.update(rig(job))
         elif op == "pose_views":
             report.update(pose_views(job))
+        elif op == "face_view":
+            report.update(face_view(job))
+        elif op == "project_face":
+            report.update(project_face(job))
         elif op != "version":
             if op not in OPS:
                 raise ValueError(f"unknown operation {op!r}")

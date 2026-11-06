@@ -8,7 +8,9 @@ use glam::{Mat4, Quat, Vec3};
 
 use crate::analysis::{self, CheckOptions, RepairOptions};
 use crate::command::{Command, ObjectInfo, Outcome, SavedAsset, SizeAxis};
-use crate::engine::{Engines, GenerateRequest, Generated, MeshOp, Progress, RigReport, RigRequest};
+use crate::engine::{
+    Engines, FaceRequest, GenerateRequest, Generated, MeshOp, Progress, RigReport, RigRequest,
+};
 use crate::error::{Error, Result};
 use crate::hollow;
 use crate::io;
@@ -432,13 +434,7 @@ impl Session {
                             .into(),
                     ));
                 }
-                if let Some(r) = repaint
-                    && !(r > 0.0 && r <= 1.0)
-                {
-                    return Err(Error::InvalidArgument(format!(
-                        "repaint is a share from 0 to 1, got {r}"
-                    )));
-                }
+                share(repaint, "repaint")?;
                 Work::Generate {
                     request: GenerateRequest {
                         prompt,
@@ -477,6 +473,28 @@ impl Session {
                     triangles,
                     materials,
                 })
+            }
+            Command::SharpenFace {
+                model,
+                face,
+                output,
+                prompt,
+                repaint,
+                seed,
+            } => {
+                generator(&self.engines)?;
+                rigger(&self.engines)?;
+                must_exist(&model)?;
+                must_exist(&face)?;
+                share(repaint, "repaint")?;
+                Work::Face {
+                    model,
+                    face,
+                    output,
+                    prompt: prompt.filter(|p| !p.trim().is_empty()),
+                    repaint: repaint.unwrap_or(FACE_REPAINT),
+                    seed,
+                }
             }
             other => unreachable!("{} is not a job", other.label()),
         };
@@ -535,6 +553,14 @@ enum Work {
         keep_look: bool,
     },
     Rig(RigRequest),
+    Face {
+        model: PathBuf,
+        face: PathBuf,
+        output: PathBuf,
+        prompt: Option<String>,
+        repaint: f32,
+        seed: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -569,6 +595,12 @@ enum WorkResult {
     Rigged {
         request: RigRequest,
         report: RigReport,
+    },
+    Face {
+        model: PathBuf,
+        output: PathBuf,
+        picture: PathBuf,
+        texels: usize,
     },
 }
 
@@ -663,10 +695,38 @@ impl Job {
                         triangles: request.faces,
                         materials,
                     };
-                    let report = rigger(&self.engines)?
+                    let mut report = rigger(&self.engines)?
                         .rig(&request)
                         .map_err(Error::Engine)?;
                     generated.path = request.output;
+                    if let Some(face) = &generated.info.face {
+                        let output = generated
+                            .path
+                            .with_file_name(format!("{stem}-rigged-face.glb"));
+                        let prompt = generated.info.prompt.clone().unwrap_or_default();
+                        let faced = sharpen_face(
+                            &self.engines,
+                            &generated.path,
+                            face,
+                            &output,
+                            (&prompt, Some(generated.info.seed), FACE_REPAINT),
+                            &|f, s| progress(0.93 + f * 0.07, s),
+                        );
+                        // The rigged model is still good without it; say why.
+                        match faced {
+                            Ok((picture, _)) => {
+                                generated.path = output;
+                                generated.info.face_close_up = Some(picture);
+                            }
+                            Err(e) => {
+                                let note = format!("the face was not sharpened: {e}");
+                                report.note = Some(match report.note.take() {
+                                    Some(n) => format!("{n}; {note}"),
+                                    None => note,
+                                });
+                            }
+                        }
+                    }
                     generated.info.rig = Some(report);
                 }
                 WorkResult::Generated {
@@ -682,6 +742,31 @@ impl Job {
                     .map_err(Error::Engine)?;
                 progress(1.0, "done");
                 WorkResult::Rigged { request, report }
+            }
+            Work::Face {
+                model,
+                face,
+                output,
+                prompt,
+                repaint,
+                seed,
+            } => {
+                let prompt = prompt.unwrap_or_else(|| "a person".into());
+                let (picture, texels) = sharpen_face(
+                    &self.engines,
+                    &model,
+                    &face,
+                    &output,
+                    (&prompt, seed, repaint),
+                    progress,
+                )?;
+                progress(1.0, "done");
+                WorkResult::Face {
+                    model,
+                    output,
+                    picture,
+                    texels,
+                }
             }
         };
         Ok(JobOutput {
@@ -732,6 +817,26 @@ impl JobOutput {
                 size_mm,
             } => finish_generation(scene, engines, generated, name.as_deref(), *size_mm),
             WorkResult::Rigged { request, report } => finish_rig(scene, engines, request, report),
+            WorkResult::Face {
+                model,
+                output,
+                picture,
+                texels,
+            } => {
+                let created = add_file(scene, engines, output)?;
+                Ok(Outcome {
+                    summary: format!(
+                        "Painted a sharp face onto {} ({texels} texels, from {}); wrote {}",
+                        file_name(model),
+                        picture.display(),
+                        output.display()
+                    ),
+                    objects: infos(scene, &created)?,
+                    created,
+                    path: Some(output.clone()),
+                    ..Outcome::default()
+                })
+            }
         }
     }
 }
@@ -742,15 +847,7 @@ fn finish_rig(
     request: &RigRequest,
     report: &RigReport,
 ) -> Result<Outcome> {
-    let new = io::import(&request.output)?;
-    let created: Vec<ObjectId> = new.into_iter().map(|o| scene.add(o)).collect();
-    apply(
-        scene,
-        Command::PlaceOnFloor {
-            objects: Some(created.clone()),
-        },
-        engines,
-    )?;
+    let created = add_file(scene, engines, &request.output)?;
     Ok(Outcome {
         summary: format!(
             "Rigged {} like {}: {}; wrote {}",
@@ -766,6 +863,20 @@ fn finish_rig(
     })
 }
 
+/// Imports a model file into the scene, standing on the floor.
+fn add_file(scene: &mut Scene, engines: &Engines, path: &std::path::Path) -> Result<Vec<ObjectId>> {
+    let new = io::import(path)?;
+    let created: Vec<ObjectId> = new.into_iter().map(|o| scene.add(o)).collect();
+    apply(
+        scene,
+        Command::PlaceOnFloor {
+            objects: Some(created.clone()),
+        },
+        engines,
+    )?;
+    Ok(created)
+}
+
 fn file_name(path: &std::path::Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),
@@ -776,6 +887,56 @@ fn file_name(path: &std::path::Path) -> String {
 /// How much of the reference a remake (`keep_look`) repaints by default:
 /// enough for the portrait's face, little enough to keep the arms and colours.
 const KEEP_LOOK_REPAINT: f32 = 0.7;
+
+/// How much of a face close-up ComfyUI redraws unless told otherwise: enough
+/// to sharpen it and bring in the portrait's likeness, little enough that the
+/// eyes and mouth stay where the model has them.
+const FACE_REPAINT: f32 = 0.55;
+
+/// Renders a rigged model's face close up, has it redrawn with the
+/// portrait's likeness and paints that onto the texture, writing `output`.
+/// Returns the redrawn picture and how many texels it painted.
+fn sharpen_face(
+    engines: &Engines,
+    model: &std::path::Path,
+    face: &std::path::Path,
+    output: &std::path::Path,
+    (prompt, seed, repaint): (&str, Option<u64>, f32),
+    progress: Progress<'_>,
+) -> Result<(PathBuf, usize)> {
+    let rigger = rigger(engines)?;
+    let stem = output
+        .file_stem()
+        .map_or_else(|| "model".into(), |s| s.to_string_lossy().into_owned());
+    let render = output.with_file_name(format!("{stem}-view.png"));
+    progress(0.0, "rendering the face close up in Blender");
+    rigger.face_view(model, &render).map_err(Error::Engine)?;
+    let request = FaceRequest {
+        render,
+        face: face.to_path_buf(),
+        prompt: prompt.to_owned(),
+        seed,
+        repaint,
+    };
+    let picture = generator(engines)?
+        .redraw_face(&request, &|f, s| progress(0.05 + f * 0.85, s))
+        .map_err(Error::Engine)?;
+    progress(0.9, "painting the face onto the texture in Blender");
+    let texels = rigger
+        .project_face(model, &picture, output)
+        .map_err(Error::Engine)?;
+    Ok((picture, texels))
+}
+
+/// Checks an optional share is in (0, 1].
+fn share(value: Option<f32>, name: &str) -> Result<()> {
+    match value {
+        Some(v) if !(v > 0.0 && v <= 1.0) => Err(Error::InvalidArgument(format!(
+            "{name} is a share from 0 to 1, got {v}"
+        ))),
+        _ => Ok(()),
+    }
+}
 
 /// Renders the reference character as the pose guide for a new picture, into
 /// the temp folder (one file per reference and layout, replaced each time).
@@ -1300,7 +1461,8 @@ fn apply(scene: &mut Scene, command: Command, engines: &Engines) -> Result<Outco
         | Command::Decimate { .. }
         | Command::UvUnwrap { .. }
         | Command::Generate { .. }
-        | Command::Rig { .. } => unreachable!("handled by Session::run"),
+        | Command::Rig { .. }
+        | Command::SharpenFace { .. } => unreachable!("handled by Session::run"),
     }
 }
 
@@ -1691,6 +1853,41 @@ mod tests {
                 },
             })
         }
+
+        /// Writes what it drew over and with which prompt.
+        fn redraw_face(
+            &self,
+            request: &crate::engine::FaceRequest,
+            progress: Progress<'_>,
+        ) -> std::result::Result<std::path::PathBuf, String> {
+            progress(0.5, "redrawing");
+            let render = std::fs::read_to_string(&request.render).map_err(|e| e.to_string())?;
+            let path = self.0.join("face-redrawn.png");
+            let text = format!(
+                "{render} redrawn as {} at {}",
+                request.prompt, request.repaint
+            );
+            std::fs::write(&path, text).map_err(|e| e.to_string())?;
+            Ok(path)
+        }
+    }
+
+    /// A generator with no face redrawing, like hub-gen on its own.
+    #[derive(Debug)]
+    struct NoFaces(FakeGenerator);
+
+    impl crate::engine::Generator for NoFaces {
+        fn describe(&self) -> String {
+            "no faces".into()
+        }
+
+        fn generate(
+            &self,
+            request: &GenerateRequest,
+            progress: Progress<'_>,
+        ) -> std::result::Result<Generated, String> {
+            self.0.generate(request, progress)
+        }
     }
 
     #[test]
@@ -1799,6 +1996,28 @@ mod tests {
             std::fs::write(output, text).map_err(|e| e.to_string())
         }
 
+        fn face_view(
+            &self,
+            _model: &std::path::Path,
+            output: &std::path::Path,
+        ) -> std::result::Result<(), String> {
+            std::fs::write(output, "face view").map_err(|e| e.to_string())
+        }
+
+        /// Copies the model, as if its texture had been painted.
+        fn project_face(
+            &self,
+            model: &std::path::Path,
+            picture: &std::path::Path,
+            output: &std::path::Path,
+        ) -> std::result::Result<usize, String> {
+            if !picture.exists() {
+                return Err(format!("no picture at {}", picture.display()));
+            }
+            std::fs::copy(model, output).map_err(|e| e.to_string())?;
+            Ok(4096)
+        }
+
         fn rig(
             &self,
             request: &crate::engine::RigRequest,
@@ -1875,7 +2094,18 @@ mod tests {
         assert_eq!(std::fs::read_to_string(pose).unwrap(), "sheet textured");
         let rig = info.rig.unwrap();
         assert_eq!(rig.materials, ["surv_mei.body"]);
+        assert_eq!(rig.note, None);
         assert!(dir.path().join("out-rigged.glb").exists());
+        // With a portrait, the face is redrawn close up and painted on.
+        let close_up = info.face_close_up.expect("the face was sharpened");
+        assert_eq!(
+            std::fs::read_to_string(close_up).unwrap(),
+            format!("face view redrawn as Mei, a survivor in a red jacket at {FACE_REPAINT}")
+        );
+        assert_eq!(
+            out.path.as_deref(),
+            Some(dir.path().join("out-rigged-face.glb").as_path())
+        );
         assert_eq!(s.scene().objects().len(), 1);
 
         let err = s
@@ -1883,5 +2113,77 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("a face is kept"), "{err}");
+    }
+
+    #[test]
+    fn a_face_that_cannot_be_redrawn_leaves_the_rigged_model_with_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir.path().join("reference.glb");
+        std::fs::write(&reference, b"glTF").unwrap();
+        let face = dir.path().join("portrait.png");
+        std::fs::write(&face, b"png").unwrap();
+        let mut s = Session::with_engines(Engines {
+            generator: Some(Arc::new(NoFaces(FakeGenerator(dir.path().to_owned())))),
+            rigger: Some(Arc::new(FakeRigger)),
+            ..Engines::default()
+        });
+        let mut command = character(Some(face), None);
+        if let Command::Generate { rig_like, .. } = &mut command {
+            *rig_like = Some(reference);
+        }
+        let out = s.execute(command).unwrap();
+        let info = out.generation.unwrap();
+        assert_eq!(info.face_close_up, None);
+        let note = info.rig.unwrap().note.unwrap();
+        assert!(
+            note.contains("not sharpened") && note.contains("ComfyUI"),
+            "{note}"
+        );
+        assert_eq!(
+            out.path.as_deref(),
+            Some(dir.path().join("out-rigged.glb").as_path())
+        );
+    }
+
+    #[test]
+    fn sharpen_face_paints_a_redrawn_close_up_onto_a_rigged_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("mei-rigged.glb");
+        let mut tmp = Scene::default();
+        let id = tmp.add(NewObject {
+            name: "mei".into(),
+            mesh: crate::primitives::uv_sphere(0.5, 16, 8),
+            transform: Transform::IDENTITY,
+            material: crate::scene::Material::default(),
+        });
+        io::export(&model, &[tmp.get(id).unwrap()]).unwrap();
+        let face = dir.path().join("portrait.png");
+        std::fs::write(&face, b"png").unwrap();
+        let output = dir.path().join("mei-face.glb");
+        let command = |repaint| Command::SharpenFace {
+            model: model.clone(),
+            face: face.clone(),
+            output: output.clone(),
+            prompt: None,
+            repaint,
+            seed: None,
+        };
+        let mut s = Session::with_engines(Engines {
+            generator: Some(Arc::new(FakeGenerator(dir.path().to_owned()))),
+            rigger: Some(Arc::new(FakeRigger)),
+            ..Engines::default()
+        });
+        let err = s.execute(command(Some(1.5))).unwrap_err().to_string();
+        assert!(err.contains("from 0 to 1"), "{err}");
+
+        let out = s.execute(command(Some(0.4))).unwrap();
+        assert!(out.summary.contains("4096 texels"), "{}", out.summary);
+        assert_eq!(out.path.as_deref(), Some(output.as_path()));
+        assert_eq!(out.created.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("face-redrawn.png")).unwrap(),
+            "face view redrawn as a person at 0.4"
+        );
+        assert!(dir.path().join("mei-face-view.png").exists());
     }
 }

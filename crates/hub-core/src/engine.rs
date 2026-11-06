@@ -129,6 +129,9 @@ pub struct GenerationInfo {
     /// How the model was rigged, when it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rig: Option<RigReport>,
+    /// The sharp close-up of the face painted onto the texture, when one was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_close_up: Option<PathBuf>,
 }
 
 /// A finished generation: a GLB on disk plus how it was made.
@@ -152,6 +155,38 @@ pub trait Generator: Send + Sync + fmt::Debug {
         request: &GenerateRequest,
         progress: Progress<'_>,
     ) -> Result<Generated, String>;
+
+    /// Redraws a close-up of a model's face ([`Rigger::face_view`]) sharply,
+    /// with the likeness of a portrait, keeping it where it is in the frame.
+    /// Returns the new picture (PNG). Engines that can't say so.
+    fn redraw_face(
+        &self,
+        request: &FaceRequest,
+        progress: Progress<'_>,
+    ) -> Result<PathBuf, String> {
+        let _ = (request, progress);
+        Err(format!(
+            "{} cannot redraw faces; that needs ComfyUI with the PuLID add-on",
+            self.describe()
+        ))
+    }
+}
+
+/// What [`Generator::redraw_face`] draws over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceRequest {
+    /// The close-up render of the model's head.
+    pub render: PathBuf,
+    /// The portrait whose face to keep.
+    pub face: PathBuf,
+    /// Who it is, e.g. the prompt the character was made from.
+    pub prompt: String,
+    /// Random when omitted.
+    pub seed: Option<u64>,
+    /// How much of the render to repaint, 0 to 1: more is sharper and more
+    /// like the portrait, less stays truer to where the model's eyes and
+    /// mouth are.
+    pub repaint: f32,
 }
 
 /// Fit a new model to a rigged character. Works on files, because the scene
@@ -218,6 +253,17 @@ pub trait Rigger: Send + Sync + fmt::Debug {
         textured: bool,
         output: &Path,
     ) -> Result<(), String>;
+
+    /// Renders the head of a rigged, textured model from the front, close up
+    /// and unlit, into `output` (a square PNG): the picture
+    /// [`Generator::redraw_face`] draws over.
+    fn face_view(&self, model: &Path, output: &Path) -> Result<(), String>;
+
+    /// Paints `picture`, a redrawing of [`Rigger::face_view`]'s render, onto
+    /// the front of the model's head through the same camera, and writes the
+    /// model with its new texture to `output`. Returns how many texels it
+    /// painted.
+    fn project_face(&self, model: &Path, picture: &Path, output: &Path) -> Result<usize, String>;
 }
 
 /// The engines available to a session. Cheap to clone.

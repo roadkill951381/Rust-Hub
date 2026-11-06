@@ -23,7 +23,7 @@ use std::sync::Arc;
 use hub_blender::LazyBlender;
 use hub_comfy::{ComfyUi, parse_engine};
 use hub_core::Engines;
-use hub_core::engine::{GenerateRequest, Generated, Generator, Progress};
+use hub_core::engine::{FaceRequest, GenerateRequest, Generated, Generator, Progress};
 use hub_core::library::Library;
 use hub_generate::Client;
 
@@ -133,6 +133,15 @@ impl Generator for Generators {
         generated.info.image_model = Some(format!("comfyui:{name}"));
         generated.info.image = Some(picture);
         Ok(generated)
+    }
+
+    /// Faces are redrawn in ComfyUI; hub-gen has no face model.
+    fn redraw_face(
+        &self,
+        request: &FaceRequest,
+        progress: Progress<'_>,
+    ) -> Result<PathBuf, String> {
+        self.comfy.redraw_face(request, progress)
     }
 }
 
