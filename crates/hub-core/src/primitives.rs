@@ -55,7 +55,8 @@ pub fn cube(size: f32) -> Mesh {
         for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
             mesh.positions.push((n + u * su + v * sv) * h);
             mesh.normals.push(n);
-            mesh.uvs.push(Vec2::new((su + 1.0) * 0.5, (1.0 - sv) * 0.5));
+            mesh.uvs
+                .push(Vec2::new(f32::midpoint(su, 1.0), (1.0 - sv) * 0.5));
         }
         mesh.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);

@@ -471,6 +471,8 @@ impl HubServer {
     }
 }
 
+// `tool_handler` generates `async fn call_tool` without an `.await`.
+#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for HubServer {
     fn get_info(&self) -> ServerConfig {

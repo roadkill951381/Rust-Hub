@@ -32,7 +32,11 @@ impl Mesh {
 
     /// Iterates over triangles as index triples.
     pub fn triangles(&self) -> impl ExactSizeIterator<Item = [u32; 3]> + '_ {
-        self.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]])
+        self.indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|t| [t[0], t[1], t[2]])
     }
 
     /// Checks the invariants every other function relies on.
@@ -100,7 +104,7 @@ impl Mesh {
 
     /// Reverses the winding of every triangle and negates the normals.
     pub fn flip_all(&mut self) {
-        for tri in self.indices.chunks_exact_mut(3) {
+        for tri in self.indices.as_chunks_mut::<3>().0 {
             tri.swap(1, 2);
         }
         for n in &mut self.normals {
