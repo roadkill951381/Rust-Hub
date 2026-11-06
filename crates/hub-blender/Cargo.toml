@@ -1,0 +1,17 @@
+[package]
+name = "hub-blender"
+description = "Runs Rust-Hub mesh jobs (remesh, decimate, UV unwrap) in Blender in the background."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hub-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

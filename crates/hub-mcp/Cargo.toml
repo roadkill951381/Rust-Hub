@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 base64 = "0.23"
 hub-core.workspace = true
+hub-engines.workspace = true
+hub-updates.workspace = true
 hub-render.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
@@ -18,6 +20,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+glam.workspace = true
+hub-generate.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util"] }

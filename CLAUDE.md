@@ -15,7 +15,30 @@ Read `README.md` for the architecture and roadmap.
   vertices along seams. 3MF export writes welded vertices; slicers need shared indices.
 - Meshes live behind `Arc`. Replace the `Arc` when geometry changes; the
   renderer re-uploads only when the pointer changes.
-- `hub-core` has no UI or GPU dependencies. Keep it that way.
+- `hub-core` has no UI, GPU, process or network dependencies. Keep it that way.
+  External tools sit behind the traits in `engine.rs` (`MeshTools` is Blender
+  in `hub-blender`, `Generator` is the hub-gen client in `hub-generate` or
+  ComfyUI in `hub-comfy`, routed by `hub_engines::Generators`); front ends get
+  them from `hub_engines::from_env()`.
+- Slow commands (`Command::is_job`) go through `Session::begin`, then
+  `Job::run` off the UI or async thread, then `Session::finish`. Never hold the
+  session lock while a job runs. `execute` still works for them, inline.
+- A missing engine is an `Error::Engine` that tells the person how to set it
+  up; tests use fake engines, and live-engine tests skip unless `HUB_BLENDER`
+  or `HUB_GEN_TEST_URL` is set.
+
+## The generation service
+
+`services/hub-gen` is Python (FastAPI, PyTorch), managed with uv:
+
+```sh
+cd services/hub-gen
+uv sync && uv run ruff check && uv run ruff format --check && uv run pytest
+uv run hub-gen serve --demo      # procedural models, no GPU; the Rust tests can use it
+```
+
+GPU adapters live in `hub_gen/backends/`; check them against the upstream
+sources (Hunyuan3D-2 at the pinned commit, TripoSG) rather than memory.
 
 ## Before pushing
 

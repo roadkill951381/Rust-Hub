@@ -27,6 +27,52 @@ jobs:
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
 
+  service:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: services/hub-gen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run pytest
+
+  # The Rust client and the phase 2 gate against a live service (demo models).
+  end-to-end:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+      - name: Start hub-gen with the demo models
+        working-directory: services/hub-gen
+        run: |
+          uv sync
+          # Run the installed script, not `uv run`: a running uv holds the uv
+          # cache lock and stalls the cache step at the end of the job.
+          nohup .venv/bin/hub-gen serve --demo --port 8765 --token ci > "$RUNNER_TEMP/hub-gen.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/hub-gen.pid"
+          for i in $(seq 60); do
+            curl -sf -H "Authorization: Bearer ci" http://127.0.0.1:8765/health && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/hub-gen.log"
+          exit 1
+      - name: Generation tests against the service
+        env:
+          HUB_GEN_TEST_URL: http://127.0.0.1:8765
+          HUB_GEN_TEST_TOKEN: ci
+        run: |
+          cargo test -p hub-generate
+          cargo test -p hub-mcp --test generate_gate
+      - name: Stop hub-gen
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/hub-gen.pid")" 2>/dev/null || true
+
   build:
     strategy:
       matrix:

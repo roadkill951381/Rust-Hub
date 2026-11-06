@@ -9,12 +9,16 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use hub_core::primitives::Primitive;
-use hub_core::{Command, Material, ObjectId, Session, SizeAxis};
+use hub_core::{Command, Material, ObjectId, Session, SizeAxis, Step};
 use hub_render::{FrameOptions, Headless};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
-use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, ProgressNotificationParam, ServerCapabilities,
+    ServerConfig,
+};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -28,7 +32,16 @@ add_primitive and list_objects.
 
 Typical print workflow: import -> scale_to_size -> place_on_floor -> \
 check_printable -> repair if needed -> export to .stl or .3mf. Call \
-render_preview to look at the result. Every edit can be undone with undo.";
+render_preview to look at the result. Every edit can be undone with undo.
+
+Making new models: generate (a text prompt or a picture) runs on the person's \
+own GPU through the local hub-gen service, adds the model resting on the floor \
+and saves it to the asset library. For printing, pass size_mm, then \
+check_printable; generated models often need repair with \
+remove_small_shells 0.01. Use hollow for resin prints, decimate to cut \
+triangle counts for games, remesh to fuse overlapping parts, and uv_unwrap \
+before texturing (remesh, decimate and uv_unwrap run Blender). \
+check_printable also measures wall thickness against min_wall_mm (0.8 by default).";
 
 /// The MCP server state: one editing session and a lazily created renderer.
 #[derive(Clone)]
@@ -139,6 +152,132 @@ pub struct ScaleToSizeArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct CheckArgs {
+    /// Object ids; every object when omitted.
+    #[serde(default)]
+    pub objects: Option<Vec<ObjectId>>,
+    /// Thinnest acceptable wall in mm (default 0.8, two 0.4 mm nozzle lines).
+    #[serde(default)]
+    pub min_wall_mm: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RepairArgs {
+    /// Object ids; every object when omitted.
+    #[serde(default)]
+    pub objects: Option<Vec<ObjectId>>,
+    /// Close holes with new triangles (default true).
+    #[serde(default)]
+    pub fill_holes: Option<bool>,
+    /// Delete loose pieces smaller than this fraction of the largest piece's
+    /// volume; 0.01 suits AI-generated models.
+    #[serde(default)]
+    pub remove_small_shells: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HollowArgs {
+    #[serde(default)]
+    pub objects: Option<Vec<ObjectId>>,
+    /// Wall thickness in mm; 2 is typical for resin.
+    pub wall_mm: f32,
+    /// Grid spacing in mm; defaults to half the wall.
+    #[serde(default)]
+    pub voxel_mm: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RemeshArgs {
+    #[serde(default)]
+    pub objects: Option<Vec<ObjectId>>,
+    /// Voxel size in mm; detail smaller than this is lost.
+    pub voxel_mm: f32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DecimateArgs {
+    #[serde(default)]
+    pub objects: Option<Vec<ObjectId>>,
+    /// Fraction of triangles to keep, 0 to 1.
+    #[serde(default)]
+    pub ratio: Option<f32>,
+    /// Target triangle count per object (instead of ratio).
+    #[serde(default)]
+    pub triangles: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UnwrapArgs {
+    #[serde(default)]
+    pub objects: Option<Vec<ObjectId>>,
+    /// Seam angle in degrees (default 66).
+    #[serde(default)]
+    pub angle_deg: Option<f32>,
+    /// Island margin, 0 to 0.5 of the texture (default 0.02).
+    #[serde(default)]
+    pub margin: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GenerateArgs {
+    /// One object to make, e.g. "a knight in plate armour, full body, standing".
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Absolute path of a PNG or JPEG of one object, used instead of a prompt.
+    #[serde(default)]
+    pub image: Option<PathBuf>,
+    /// Shape model: hunyuan3d-2 (default), hunyuan3d-2mini or triposg on the
+    /// hub-gen service, or "comfyui" / "comfyui:<workflow>" to run the whole
+    /// job in the person's ComfyUI.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Text-to-image model for a prompt: hunyuan-dit (default) or
+    /// flux-schnell on hub-gen, or "comfyui" to make the picture with the
+    /// person's ComfyUI (FLUX) and the shape on hub-gen.
+    #[serde(default)]
+    pub image_model: Option<String>,
+    /// Also paint a colour texture (slower).
+    #[serde(default)]
+    pub texture: bool,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// Target triangle count.
+    #[serde(default)]
+    pub faces: Option<u32>,
+    /// Name for the object and its library asset.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Scale so the longest side is this many mm.
+    #[serde(default)]
+    pub size_mm: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SaveAssetArgs {
+    pub name: String,
+    #[serde(default)]
+    pub objects: Option<Vec<ObjectId>>,
+    /// What changed in this version.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LoadAssetArgs {
+    pub name: String,
+    /// Version number; the latest when omitted.
+    #[serde(default)]
+    pub version: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListAssetsArgs {
+    /// Only assets whose name contains this text.
+    #[serde(default)]
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetMaterialArgs {
     pub object: ObjectId,
     pub material: Material,
@@ -171,29 +310,87 @@ pub struct RenderArgs {
 
 #[tool_router]
 impl HubServer {
+    /// A server with the engines found in the environment (see `hub-engines`).
     pub fn new() -> Self {
+        Self::with_session(Session::with_engines(hub_engines::from_env()))
+    }
+
+    /// A server around an existing session, e.g. one with test engines.
+    pub fn with_session(session: Session) -> Self {
         Self {
-            session: Arc::new(Mutex::new(Session::new())),
+            session: Arc::new(Mutex::new(session)),
             renderer: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Runs a command on a blocking thread and turns the outcome into a tool result.
-    async fn run(&self, command: Command) -> Result<CallToolResult, McpError> {
+    /// Runs a long command without holding the session while it works, so
+    /// other tools stay responsive, and reports progress to the client when
+    /// it asked for it.
+    async fn run_job(
+        &self,
+        command: Command,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let session = Arc::clone(&self.session);
+        let step = tokio::task::spawn_blocking(move || lock(&session).begin(command))
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let job = match step {
+            Ok(Step::Done(outcome)) => return Ok(success(&outcome)),
+            Ok(Step::Job(job)) => job,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    e.to_string(),
+                )]));
+            }
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(f32, String)>();
+        let work = tokio::task::spawn_blocking(move || {
+            job.run(&move |fraction, stage| {
+                let _ = tx.send((fraction, stage.to_owned()));
+            })
+        });
+        if let Some(token) = context.meta.get_progress_token() {
+            let peer = context.peer.clone();
+            tokio::spawn(async move {
+                let mut last = String::new();
+                while let Some((fraction, stage)) = rx.recv().await {
+                    if stage == last && fraction < 1.0 {
+                        continue;
+                    }
+                    last.clone_from(&stage);
+                    let param = ProgressNotificationParam::new(token.clone(), f64::from(fraction))
+                        .with_total(1.0)
+                        .with_message(stage);
+                    let _ = peer.notify_progress(param).await;
+                }
+            });
+        }
+        let output = work
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let session = Arc::clone(&self.session);
         let result = tokio::task::spawn_blocking(move || {
-            session
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .execute(command)
+            output.and_then(|output| lock(&session).finish(output))
         })
         .await
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(match result {
-            Ok(outcome) => CallToolResult::success(vec![ContentBlock::text(
-                serde_json::to_string_pretty(&outcome).unwrap_or(outcome.summary),
-            )]),
+            Ok(outcome) => success(&outcome),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(e.to_string())]),
+        })
+    }
+
+    /// Runs a command on a blocking thread and turns the outcome into a tool result.
+    async fn run(&self, command: Command) -> Result<CallToolResult, McpError> {
+        let session = Arc::clone(&self.session);
+        let result = tokio::task::spawn_blocking(move || lock(&session).execute(command))
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(match result {
+            Ok(outcome) => success(&outcome),
             Err(e) => CallToolResult::error(vec![ContentBlock::text(e.to_string())]),
         })
     }
@@ -336,24 +533,152 @@ impl HubServer {
     }
 
     #[tool(
-        description = "Check objects for 3D printing: watertight (no holes), outward-facing, no zero-area faces, with size (mm), volume and a list of issues."
+        description = "Check objects for 3D printing: watertight (no holes), outward-facing, no zero-area faces, wall thickness against min_wall_mm, with size (mm), volume, issues (block printing) and warnings (e.g. thin walls)."
     )]
     async fn check_printable(
         &self,
-        Parameters(a): Parameters<SelectionArgs>,
+        Parameters(a): Parameters<CheckArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.run(Command::CheckPrintable { objects: a.objects })
-            .await
+        self.run(Command::CheckPrintable {
+            objects: a.objects,
+            min_wall_mm: a.min_wall_mm,
+        })
+        .await
     }
 
     #[tool(
-        description = "Fix common mesh problems: remove zero-area and duplicate triangles, unify face winding, flip inside-out shells. Holes are reported, not filled. Returns a fresh print check."
+        description = "Fix common mesh problems: remove zero-area and duplicate triangles, unify face winding, fill holes, flip inside-out shells, and optionally drop small loose pieces. Returns a fresh print check."
     )]
     async fn repair(
         &self,
-        Parameters(a): Parameters<SelectionArgs>,
+        Parameters(a): Parameters<RepairArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.run(Command::Repair { objects: a.objects }).await
+        self.run(Command::Repair {
+            objects: a.objects,
+            fill_holes: a.fill_holes,
+            remove_small_shells: a.remove_small_shells,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Hollow watertight objects for resin printing, leaving walls wall_mm thick. Returns a print check of the result."
+    )]
+    async fn hollow(
+        &self,
+        Parameters(a): Parameters<HollowArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let command = Command::Hollow {
+            objects: a.objects,
+            wall_mm: a.wall_mm,
+            voxel_mm: a.voxel_mm,
+        };
+        self.run_job(command, context).await
+    }
+
+    #[tool(
+        description = "Rebuild surfaces on a voxel grid with Blender: closes holes, fuses overlapping parts, evens out triangles. Removes UVs."
+    )]
+    async fn remesh(
+        &self,
+        Parameters(a): Parameters<RemeshArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let command = Command::Remesh {
+            objects: a.objects,
+            voxel_mm: a.voxel_mm,
+        };
+        self.run_job(command, context).await
+    }
+
+    #[tool(
+        description = "Reduce triangle counts with Blender, keeping shape and UVs. Give ratio (0 to 1) or triangles."
+    )]
+    async fn decimate(
+        &self,
+        Parameters(a): Parameters<DecimateArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let command = Command::Decimate {
+            objects: a.objects,
+            ratio: a.ratio,
+            triangles: a.triangles,
+        };
+        self.run_job(command, context).await
+    }
+
+    #[tool(description = "Lay out new UVs with Blender's Smart UV Project, ready for texturing.")]
+    async fn uv_unwrap(
+        &self,
+        Parameters(a): Parameters<UnwrapArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let command = Command::UvUnwrap {
+            objects: a.objects,
+            angle_deg: a.angle_deg,
+            margin: a.margin,
+        };
+        self.run_job(command, context).await
+    }
+
+    #[tool(
+        description = "Generate a 3D model from a text prompt or a picture on the person's own GPU (local hub-gen service; nothing is billed). Adds it resting on the floor, optionally scaled to size_mm, and saves it to the asset library. Takes from seconds to a few minutes; the first run downloads the model."
+    )]
+    async fn generate(
+        &self,
+        Parameters(a): Parameters<GenerateArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let command = Command::Generate {
+            prompt: a.prompt,
+            image: a.image,
+            model: a.model,
+            image_model: a.image_model,
+            texture: a.texture,
+            seed: a.seed,
+            faces: a.faces,
+            name: a.name,
+            size_mm: a.size_mm,
+        };
+        self.run_job(command, context).await
+    }
+
+    #[tool(description = "Save objects as a new version of a named asset in the library.")]
+    async fn save_asset(
+        &self,
+        Parameters(a): Parameters<SaveAssetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run(Command::SaveAsset {
+            name: a.name,
+            objects: a.objects,
+            note: a.note,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Add a library asset to the scene, the latest version unless one is given."
+    )]
+    async fn load_asset(
+        &self,
+        Parameters(a): Parameters<LoadAssetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run(Command::LoadAsset {
+            name: a.name,
+            version: a.version,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List library assets with every version: how each was made (prompt, model, seed), size and note."
+    )]
+    async fn list_assets(
+        &self,
+        Parameters(a): Parameters<ListAssetsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run(Command::ListAssets { query: a.query }).await
     }
 
     #[tool(
@@ -410,6 +735,20 @@ impl HubServer {
         } else {
             CallToolResult::success(vec![text])
         })
+    }
+
+    #[tool(
+        description = "Check every piece Rust-Hub runs on for newer versions: the hub itself, hub-gen's Python packages, model weights, ComfyUI with its custom nodes and model files, Blender, uv, Rust and the NVIDIA driver. Changes nothing. Each item has a status (current, available, held_back, not_installed, unknown) and, when it can move forward, the exact upgrade commands with their folders. Ask the person before running any of them: some download gigabytes, and hub-gen or ComfyUI must be stopped first when `blocked` says so."
+    )]
+    async fn check_updates(&self) -> Result<CallToolResult, McpError> {
+        let report =
+            tokio::task::spawn_blocking(|| hub_updates::check(&hub_updates::Setup::from_env()))
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let body = serde_json::json!({ "summary": report.summary(), "pieces": report.pieces });
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            serde_json::to_string_pretty(&body).unwrap_or_default(),
+        )]))
     }
 
     #[tool(
@@ -483,6 +822,18 @@ impl ServerHandler for HubServer {
             )
             .with_instructions(INSTRUCTIONS)
     }
+}
+
+fn lock(session: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> {
+    session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn success(outcome: &hub_core::Outcome) -> CallToolResult {
+    CallToolResult::success(vec![ContentBlock::text(
+        serde_json::to_string_pretty(outcome).unwrap_or_else(|_| outcome.summary.clone()),
+    )])
 }
 
 /// Serves the hub over stdin/stdout until the client disconnects.

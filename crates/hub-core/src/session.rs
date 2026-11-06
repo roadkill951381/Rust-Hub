@@ -1,13 +1,18 @@
 //! A session owns the scene and its undo history and executes commands.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use glam::{Mat4, Quat, Vec3};
 
-use crate::analysis;
-use crate::command::{Command, ObjectInfo, Outcome, SizeAxis};
+use crate::analysis::{self, CheckOptions, RepairOptions};
+use crate::command::{Command, ObjectInfo, Outcome, SavedAsset, SizeAxis};
+use crate::engine::{Engines, GenerateRequest, Generated, MeshOp, Progress};
 use crate::error::{Error, Result};
+use crate::hollow;
 use crate::io;
+use crate::library::{AssetSource, Library, NewVersion};
+use crate::mesh::Mesh;
 use crate::scene::{NewObject, Object, ObjectId, Scene, Transform};
 
 const MM: f32 = 0.001;
@@ -27,6 +32,7 @@ pub struct Session {
     revision: u64,
     /// Gesture id of the last coalesced edit; see [`Session::execute_coalescing`].
     gesture: Option<u64>,
+    engines: Engines,
 }
 
 impl Default for Session {
@@ -44,7 +50,24 @@ impl Session {
             history_limit: DEFAULT_HISTORY,
             revision: 0,
             gesture: None,
+            engines: Engines::default(),
         }
+    }
+
+    /// A session that can use the given engines (Blender, the generator, the library).
+    pub fn with_engines(engines: Engines) -> Self {
+        Self {
+            engines,
+            ..Self::new()
+        }
+    }
+
+    pub fn engines(&self) -> &Engines {
+        &self.engines
+    }
+
+    pub fn set_engines(&mut self, engines: Engines) {
+        self.engines = engines;
     }
 
     pub fn scene(&self) -> &Scene {
@@ -69,9 +92,36 @@ impl Session {
         self.undo.iter().map(|(label, _)| *label)
     }
 
+    /// Runs a command to completion. Long jobs (see [`Command::is_job`]) block;
+    /// a GUI should use [`Session::begin`] for those instead.
     pub fn execute(&mut self, command: Command) -> Result<Outcome> {
         self.gesture = None;
         self.run(command)
+    }
+
+    /// Starts a command. Quick commands finish immediately; long ones return a
+    /// [`Job`] to [`run`](Job::run) on another thread and hand back to
+    /// [`Session::finish`], which commits the result as one undo step.
+    /// The session stays usable while the job runs.
+    pub fn begin(&mut self, command: Command) -> Result<Step> {
+        self.gesture = None;
+        if command.is_job() {
+            self.prepare(command).map(Step::Job)
+        } else {
+            self.run(command).map(Step::Done)
+        }
+    }
+
+    /// Commits a finished job.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "a job's output is committed once"
+    )]
+    pub fn finish(&mut self, output: JobOutput) -> Result<Outcome> {
+        let mut next = self.scene.clone();
+        let outcome = output.apply(&mut next, &self.engines)?;
+        self.commit(output.label, next);
+        Ok(outcome)
     }
 
     /// Runs an edit as part of a continuous gesture, such as dragging a value
@@ -81,7 +131,7 @@ impl Session {
     pub fn execute_coalescing(&mut self, command: Command, gesture: u64) -> Result<Outcome> {
         if self.gesture == Some(gesture) && command.is_edit() {
             let mut next = self.scene.clone();
-            let outcome = apply(&mut next, command)?;
+            let outcome = apply(&mut next, command, &self.engines)?;
             self.scene = next;
             self.revision += 1;
             return Ok(outcome);
@@ -97,7 +147,28 @@ impl Session {
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
             Command::ListObjects => Ok(self.list()),
-            Command::CheckPrintable { objects } => self.check(objects.as_deref()),
+            Command::CheckPrintable {
+                objects,
+                min_wall_mm,
+            } => self.check(objects.as_deref(), min_wall_mm),
+            Command::SaveAsset {
+                name,
+                objects,
+                note,
+            } => self.save_asset(&name, objects.as_deref(), note),
+            Command::ListAssets { query } => {
+                let assets = library(&self.engines)?.list(query.as_deref())?;
+                Ok(Outcome {
+                    summary: format!("{} asset(s) in the library", assets.len()),
+                    assets,
+                    ..Outcome::default()
+                })
+            }
+            job if job.is_job() => {
+                let job = self.prepare(job)?;
+                let output = job.run(&|_, _| {})?;
+                self.finish(output)
+            }
             Command::Export { path, objects } => {
                 let ids = self.scene.resolve(objects.as_deref())?;
                 let objs: Vec<&Object> = ids
@@ -119,7 +190,7 @@ impl Session {
             edit => {
                 let label = edit.label();
                 let mut next = self.scene.clone();
-                let outcome = apply(&mut next, edit)?;
+                let outcome = apply(&mut next, edit, &self.engines)?;
                 self.commit(label, next);
                 Ok(outcome)
             }
@@ -161,11 +232,20 @@ impl Session {
         }
     }
 
-    fn check(&self, ids: Option<&[ObjectId]>) -> Result<Outcome> {
+    fn check(&self, ids: Option<&[ObjectId]>, min_wall_mm: Option<f32>) -> Result<Outcome> {
         let ids = self.scene.resolve(ids)?;
+        let mut options = CheckOptions::default();
+        if let Some(w) = min_wall_mm {
+            positive(w, "min_wall_mm")?;
+            options.min_wall_mm = w;
+        }
         let reports: Vec<_> = ids
             .iter()
-            .map(|&id| self.scene.get(id).map(analysis::check_printable))
+            .map(|&id| {
+                self.scene
+                    .get(id)
+                    .map(|o| analysis::check_printable_with(o, &options))
+            })
             .collect::<Result<_>>()?;
         let ok = reports.iter().filter(|r| r.printable).count();
         Ok(Outcome {
@@ -176,8 +256,586 @@ impl Session {
     }
 }
 
-/// Applies an edit to `scene`. Non-edit commands never reach here.
-fn apply(scene: &mut Scene, command: Command) -> Result<Outcome> {
+impl Session {
+    fn save_asset(
+        &self,
+        name: &str,
+        ids: Option<&[ObjectId]>,
+        note: Option<String>,
+    ) -> Result<Outcome> {
+        let library = library(&self.engines)?;
+        let ids = self.scene.resolve(ids)?;
+        let objects: Vec<&Object> = ids
+            .iter()
+            .map(|&id| self.scene.get(id))
+            .collect::<Result<_>>()?;
+        let new = NewVersion {
+            note,
+            source: AssetSource::Saved,
+            triangles: objects.iter().map(|o| o.mesh.triangle_count()).sum(),
+            size_mm: size_mm(self.scene.bounds_of(&ids)?),
+        };
+        let (asset, path) = library.save(name, new, |p| io::export(p, &objects))?;
+        let version = asset.latest().map_or(1, |v| v.version);
+        Ok(Outcome {
+            summary: format!(
+                "Saved {} version {version} to {}",
+                asset.name,
+                path.display()
+            ),
+            saved: Some(SavedAsset {
+                name: asset.name,
+                version,
+                path: path.clone(),
+            }),
+            path: Some(path),
+            ..Outcome::default()
+        })
+    }
+
+    /// Validates a long command and captures what its job needs.
+    fn prepare(&self, command: Command) -> Result<Job> {
+        let label = command.label();
+        let work = match command {
+            Command::Hollow {
+                objects,
+                wall_mm,
+                voxel_mm,
+            } => {
+                positive(wall_mm, "wall_mm")?;
+                if let Some(v) = voxel_mm {
+                    positive(v, "voxel_mm")?;
+                }
+                let op = MeshWork::Hollow {
+                    wall: wall_mm * MM,
+                    voxel: voxel_mm.map(|v| v * MM),
+                };
+                Work::Mesh(
+                    self.targets(objects.as_deref())?
+                        .into_iter()
+                        .map(|t| (t, op))
+                        .collect(),
+                )
+            }
+            Command::Remesh { objects, voxel_mm } => {
+                positive(voxel_mm, "voxel_mm")?;
+                mesh_tools(&self.engines)?;
+                let op = MeshWork::Tool(MeshOp::VoxelRemesh {
+                    voxel: voxel_mm * MM,
+                });
+                Work::Mesh(
+                    self.targets(objects.as_deref())?
+                        .into_iter()
+                        .map(|t| (t, op))
+                        .collect(),
+                )
+            }
+            Command::Decimate {
+                objects,
+                ratio,
+                triangles,
+            } => {
+                mesh_tools(&self.engines)?;
+                let targets = self.targets(objects.as_deref())?;
+                let mut items = Vec::with_capacity(targets.len());
+                for t in targets {
+                    let r = match (ratio, triangles) {
+                        (Some(r), None) if r > 0.0 && r <= 1.0 => r,
+                        (Some(_), None) => {
+                            return Err(Error::InvalidArgument(
+                                "ratio must be greater than 0 and at most 1".into(),
+                            ));
+                        }
+                        (None, Some(n)) if n >= 4 => {
+                            (n as f32 / t.mesh.triangle_count().max(1) as f32).min(1.0)
+                        }
+                        (None, Some(_)) => {
+                            return Err(Error::InvalidArgument(
+                                "triangles must be at least 4".into(),
+                            ));
+                        }
+                        _ => {
+                            return Err(Error::InvalidArgument(
+                                "give either ratio or triangles".into(),
+                            ));
+                        }
+                    };
+                    items.push((t, MeshWork::Tool(MeshOp::Decimate { ratio: r })));
+                }
+                Work::Mesh(items)
+            }
+            Command::UvUnwrap {
+                objects,
+                angle_deg,
+                margin,
+            } => {
+                mesh_tools(&self.engines)?;
+                let angle_deg = angle_deg.unwrap_or(66.0);
+                let margin = margin.unwrap_or(0.02);
+                if !(1.0..=89.0).contains(&angle_deg) || !(0.0..=0.5).contains(&margin) {
+                    return Err(Error::InvalidArgument(
+                        "angle_deg must be 1 to 89 and margin 0 to 0.5".into(),
+                    ));
+                }
+                let op = MeshWork::Tool(MeshOp::UvUnwrap { angle_deg, margin });
+                Work::Mesh(
+                    self.targets(objects.as_deref())?
+                        .into_iter()
+                        .map(|t| (t, op))
+                        .collect(),
+                )
+            }
+            Command::Generate {
+                prompt,
+                image,
+                model,
+                image_model,
+                texture,
+                seed,
+                faces,
+                name,
+                size_mm,
+            } => {
+                generator(&self.engines)?;
+                let prompt = prompt.filter(|p| !p.trim().is_empty());
+                if prompt.is_none() && image.is_none() {
+                    return Err(Error::InvalidArgument(
+                        "give a prompt describing the object, or an image of it".into(),
+                    ));
+                }
+                if let Some(path) = &image
+                    && !path.is_file()
+                {
+                    return Err(Error::Read {
+                        path: path.clone(),
+                        source: std::io::Error::from(std::io::ErrorKind::NotFound),
+                    });
+                }
+                if let Some(s) = size_mm {
+                    positive(s, "size_mm")?;
+                }
+                Work::Generate {
+                    request: GenerateRequest {
+                        prompt,
+                        image,
+                        model,
+                        image_model,
+                        texture,
+                        seed,
+                        faces,
+                    },
+                    name,
+                    size_mm,
+                }
+            }
+            other => unreachable!("{} is not a job", other.label()),
+        };
+        Ok(Job {
+            label,
+            work,
+            engines: self.engines.clone(),
+        })
+    }
+
+    fn targets(&self, ids: Option<&[ObjectId]>) -> Result<Vec<Target>> {
+        self.scene
+            .resolve(ids)?
+            .into_iter()
+            .map(|id| {
+                let o = self.scene.get(id)?;
+                Ok(Target {
+                    id,
+                    name: o.name.clone(),
+                    mesh: Arc::clone(&o.mesh),
+                    transform: o.transform.matrix(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// What [`Session::begin`] started.
+#[derive(Debug)]
+pub enum Step {
+    /// A quick command, already applied.
+    Done(Outcome),
+    /// A long command to run with [`Job::run`] and commit with [`Session::finish`].
+    Job(Job),
+}
+
+/// A long-running command, detached from the session so it can run on
+/// another thread while the scene stays editable.
+#[derive(Debug)]
+pub struct Job {
+    label: &'static str,
+    work: Work,
+    engines: Engines,
+}
+
+#[derive(Debug)]
+enum Work {
+    Mesh(Vec<(Target, MeshWork)>),
+    Generate {
+        request: GenerateRequest,
+        name: Option<String>,
+        size_mm: Option<f32>,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MeshWork {
+    Hollow { wall: f32, voxel: Option<f32> },
+    Tool(MeshOp),
+}
+
+#[derive(Debug)]
+struct Target {
+    id: ObjectId,
+    name: String,
+    mesh: Arc<Mesh>,
+    transform: Mat4,
+}
+
+/// A finished job, ready for [`Session::finish`].
+#[derive(Debug)]
+pub struct JobOutput {
+    label: &'static str,
+    result: WorkResult,
+}
+
+#[derive(Debug)]
+enum WorkResult {
+    Meshes(Vec<Replacement>),
+    Generated {
+        generated: Generated,
+        name: Option<String>,
+        size_mm: Option<f32>,
+    },
+}
+
+#[derive(Debug)]
+struct Replacement {
+    id: ObjectId,
+    before: Arc<Mesh>,
+    after: Mesh,
+    detail: String,
+}
+
+impl Job {
+    pub fn label(&self) -> &'static str {
+        self.label
+    }
+
+    /// Does the slow part. Touches no session state, so it can run anywhere.
+    pub fn run(self, progress: Progress<'_>) -> Result<JobOutput> {
+        let result = match self.work {
+            Work::Mesh(items) => {
+                let count = items.len();
+                let mut replaced = Vec::with_capacity(count);
+                for (i, (target, op)) in items.into_iter().enumerate() {
+                    progress(
+                        i as f32 / count as f32,
+                        &format!("{}: {}", self.label, target.name),
+                    );
+                    let world = target.mesh.transformed(target.transform);
+                    let (after, detail) = match op {
+                        MeshWork::Hollow { wall, voxel } => hollowed(&world, wall, voxel, &target)?,
+                        MeshWork::Tool(op) => {
+                            let tools = mesh_tools(&self.engines)?;
+                            let out = tools.apply(&world, op).map_err(Error::Engine)?;
+                            out.validate().map_err(|e| {
+                                Error::Engine(format!(
+                                    "{} returned a broken mesh: {e}",
+                                    tools.describe()
+                                ))
+                            })?;
+                            let detail = format!(
+                                "{}: {} to {} triangles",
+                                target.name,
+                                world.triangle_count(),
+                                out.triangle_count()
+                            );
+                            (out, detail)
+                        }
+                    };
+                    replaced.push(Replacement {
+                        id: target.id,
+                        before: target.mesh,
+                        after: after.transformed(target.transform.inverse()),
+                        detail,
+                    });
+                }
+                progress(1.0, "done");
+                WorkResult::Meshes(replaced)
+            }
+            Work::Generate {
+                request,
+                name,
+                size_mm,
+            } => {
+                let generated = generator(&self.engines)?
+                    .generate(&request, progress)
+                    .map_err(Error::Engine)?;
+                WorkResult::Generated {
+                    generated,
+                    name,
+                    size_mm,
+                }
+            }
+        };
+        Ok(JobOutput {
+            label: self.label,
+            result,
+        })
+    }
+}
+
+impl JobOutput {
+    pub fn label(&self) -> &'static str {
+        self.label
+    }
+
+    fn apply(&self, scene: &mut Scene, engines: &Engines) -> Result<Outcome> {
+        match &self.result {
+            WorkResult::Meshes(replaced) => {
+                let mut ids = Vec::with_capacity(replaced.len());
+                for r in replaced {
+                    let o = scene.get_mut(r.id)?;
+                    if !Arc::ptr_eq(&o.mesh, &r.before) {
+                        return Err(Error::Engine(format!(
+                            "object {} was edited while {} was running; run it again",
+                            r.id, self.label
+                        )));
+                    }
+                    o.mesh = Arc::new(r.after.clone());
+                    ids.push(r.id);
+                }
+                let details: Vec<&str> = replaced.iter().map(|r| r.detail.as_str()).collect();
+                let reports = if self.label == "Hollow" {
+                    ids.iter()
+                        .map(|&id| scene.get(id).map(analysis::check_printable))
+                        .collect::<Result<_>>()?
+                } else {
+                    Vec::new()
+                };
+                Ok(Outcome {
+                    summary: format!("{}: {}", self.label, details.join("; ")),
+                    objects: infos(scene, &ids)?,
+                    reports,
+                    ..Outcome::default()
+                })
+            }
+            WorkResult::Generated {
+                generated,
+                name,
+                size_mm,
+            } => finish_generation(scene, engines, generated, name.as_deref(), *size_mm),
+        }
+    }
+}
+
+fn hollowed(
+    world: &Mesh,
+    wall: f32,
+    voxel: Option<f32>,
+    target: &Target,
+) -> Result<(Mesh, String)> {
+    let t = analysis::topology(world);
+    if !t.is_watertight() || t.flipped_edges > 0 || world.signed_volume() <= 0.0 {
+        return Err(Error::InvalidArgument(format!(
+            "{} must be watertight and outward-facing to hollow; run repair first",
+            target.name
+        )));
+    }
+    let (mut inner, cavity) = hollow::cavity(world, wall, voxel)
+        .map_err(|e| Error::InvalidArgument(format!("{}: {e}", target.name)))?;
+    if !world.normals.is_empty() {
+        inner.compute_normals();
+    }
+    if !world.uvs.is_empty() {
+        inner.uvs = vec![glam::Vec2::ZERO; inner.positions.len()];
+    }
+    let mut out = world.clone();
+    out.append(&inner);
+    let detail = format!(
+        "{} hollowed with {:.1} mm walls, {:.1} cm³ removed ({:.2} mm grid)",
+        target.name,
+        wall * 1000.0,
+        cavity.volume * 1e6,
+        cavity.voxel * 1000.0
+    );
+    Ok((out, detail))
+}
+
+fn finish_generation(
+    scene: &mut Scene,
+    engines: &Engines,
+    generated: &Generated,
+    name: Option<&str>,
+    size_mm: Option<f32>,
+) -> Result<Outcome> {
+    let info = &generated.info;
+    let name = name
+        .map(str::to_owned)
+        .or_else(|| info.prompt.as_deref().map(name_from_prompt))
+        .unwrap_or_else(|| "Generated".to_owned());
+    let mut new = io::import(&generated.path)?;
+    let raw_triangles = new.iter().map(|o| o.mesh.triangle_count()).sum();
+    let raw_size = size_mm_of(&new);
+    if let [single] = new.as_mut_slice() {
+        single.name.clone_from(&name);
+    }
+    let created: Vec<ObjectId> = new.into_iter().map(|o| scene.add(o)).collect();
+    if let Some(size_mm) = size_mm {
+        apply(
+            scene,
+            Command::ScaleToSize {
+                objects: Some(created.clone()),
+                size_mm,
+                axis: SizeAxis::Longest,
+            },
+            engines,
+        )?;
+    }
+    apply(
+        scene,
+        Command::PlaceOnFloor {
+            objects: Some(created.clone()),
+        },
+        engines,
+    )?;
+
+    let saved = match &engines.library {
+        Some(library) => {
+            let new = NewVersion {
+                note: None,
+                source: AssetSource::Generated(info.clone()),
+                triangles: raw_triangles,
+                size_mm: raw_size,
+            };
+            let (asset, path) = library.save(&name, new, |p| {
+                std::fs::copy(&generated.path, p)
+                    .map(|_| ())
+                    .map_err(|source| Error::Write {
+                        path: p.to_owned(),
+                        source,
+                    })
+            })?;
+            Some(SavedAsset {
+                name: asset.name.clone(),
+                version: asset.latest().map_or(1, |v| v.version),
+                path,
+            })
+        }
+        None => None,
+    };
+    let mut summary = format!(
+        "Generated {name} with {} in {:.0} s (seed {}), {raw_triangles} triangles",
+        info.model, info.seconds, info.seed
+    );
+    if let Some(s) = &saved {
+        let _ = write!(summary, "; saved as {} version {}", s.name, s.version);
+    }
+    Ok(Outcome {
+        summary,
+        objects: infos(scene, &created)?,
+        created,
+        path: Some(generated.path.clone()),
+        saved,
+        generation: Some(info.clone()),
+        ..Outcome::default()
+    })
+}
+
+/// A short title-case name from the first words of a prompt: the subject,
+/// up to the first word that starts a description ("a stone owl with big
+/// eyes" is "Stone Owl").
+fn name_from_prompt(prompt: &str) -> String {
+    let words: Vec<String> = prompt
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .take_while(|w| {
+            !matches!(
+                w.to_lowercase().as_str(),
+                "with"
+                    | "in"
+                    | "on"
+                    | "at"
+                    | "and"
+                    | "holding"
+                    | "wearing"
+                    | "sitting"
+                    | "standing"
+                    | "for"
+                    | "from"
+                    | "that"
+                    | "which"
+            )
+        })
+        .filter(|w| !matches!(w.to_lowercase().as_str(), "a" | "an" | "the" | "of"))
+        .take(4)
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| {
+                    f.to_uppercase()
+                        .chain(c.flat_map(char::to_lowercase))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    if words.is_empty() {
+        "Generated".to_owned()
+    } else {
+        words.join(" ")
+    }
+}
+
+fn size_mm(bounds: Option<crate::mesh::Aabb>) -> [f32; 3] {
+    bounds.map_or([0.0; 3], |b| {
+        let s = b.size() * 1000.0;
+        [s.x, s.z, s.y]
+    })
+}
+
+fn size_mm_of(objects: &[NewObject]) -> [f32; 3] {
+    let bounds = objects
+        .iter()
+        .filter_map(|o| o.mesh.bounds_with(o.transform.matrix()))
+        .reduce(crate::mesh::Aabb::union);
+    size_mm(bounds)
+}
+
+fn library(engines: &Engines) -> Result<&Library> {
+    engines.library.as_ref().ok_or_else(|| {
+        Error::Library("no asset library is configured; set HUB_LIBRARY or pass --library".into())
+    })
+}
+
+fn mesh_tools(engines: &Engines) -> Result<&dyn crate::engine::MeshTools> {
+    engines.mesh_tools.as_deref().ok_or_else(|| {
+        Error::Engine(
+            "Blender is needed for this and was not found. Install Blender (4.2 or newer) \
+             from blender.org, or set HUB_BLENDER to the blender executable"
+                .into(),
+        )
+    })
+}
+
+fn generator(engines: &Engines) -> Result<&dyn crate::engine::Generator> {
+    engines.generator.as_deref().ok_or_else(|| {
+        Error::Engine(
+            "no generation service is configured. Start it with `hub-gen serve` on the GPU \
+             machine (see services/hub-gen/README.md) and set HUB_GEN_URL if it is not \
+             http://127.0.0.1:8765"
+                .into(),
+        )
+    })
+}
+
+/// Applies an edit to `scene`. Queries and jobs never reach here.
+fn apply(scene: &mut Scene, command: Command, engines: &Engines) -> Result<Outcome> {
     match command {
         Command::Import { path } => {
             let new = io::import(&path)?;
@@ -345,12 +1003,27 @@ fn apply(scene: &mut Scene, command: Command) -> Result<Outcome> {
                 "Applied the transform of object {object}"
             )))
         }
-        Command::Repair { objects } => {
+        Command::Repair {
+            objects,
+            fill_holes,
+            remove_small_shells,
+        } => {
             let ids = scene.resolve(objects.as_deref())?;
+            let options = RepairOptions {
+                fill_holes: fill_holes.unwrap_or(true),
+                remove_small_shells,
+            };
+            if let Some(f) = remove_small_shells
+                && !(0.0..1.0).contains(&f)
+            {
+                return Err(Error::InvalidArgument(
+                    "remove_small_shells must be between 0 and 1".into(),
+                ));
+            }
             let mut repairs = Vec::new();
             for &id in &ids {
                 let o = scene.get_mut(id)?;
-                let (mesh, summary) = analysis::repair(&o.mesh);
+                let (mesh, summary) = analysis::repair_with(&o.mesh, &options);
                 o.mesh = Arc::new(mesh);
                 repairs.push(summary);
             }
@@ -358,10 +1031,7 @@ fn apply(scene: &mut Scene, command: Command) -> Result<Outcome> {
                 .iter()
                 .map(|&id| scene.get(id).map(analysis::check_printable))
                 .collect::<Result<Vec<_>>>()?;
-            let fixed: usize = repairs
-                .iter()
-                .map(|r| r.removed_degenerate + r.removed_duplicates + r.flipped_triangles)
-                .sum();
+            let fixed: usize = repairs.iter().map(analysis::RepairSummary::fixes).sum();
             Ok(Outcome {
                 summary: format!("Repaired {} object(s), {fixed} triangle fixes", ids.len()),
                 repairs,
@@ -375,11 +1045,38 @@ fn apply(scene: &mut Scene, command: Command) -> Result<Outcome> {
                 "Updated the material of object {object}"
             )))
         }
+        Command::LoadAsset { name, version } => {
+            let (asset, chosen, path) = library(engines)?.find(&name, version)?;
+            let mut new = io::import(&path)?;
+            if let [single] = new.as_mut_slice() {
+                single.name.clone_from(&asset.name);
+            }
+            let created: Vec<ObjectId> = new.into_iter().map(|o| scene.add(o)).collect();
+            Ok(Outcome {
+                summary: format!(
+                    "Loaded {} version {} ({} object(s))",
+                    asset.name,
+                    chosen.version,
+                    created.len()
+                ),
+                objects: infos(scene, &created)?,
+                created,
+                path: Some(path),
+                ..Outcome::default()
+            })
+        }
         Command::Undo
         | Command::Redo
         | Command::ListObjects
         | Command::CheckPrintable { .. }
-        | Command::Export { .. } => unreachable!("handled by Session::execute"),
+        | Command::SaveAsset { .. }
+        | Command::ListAssets { .. }
+        | Command::Export { .. }
+        | Command::Hollow { .. }
+        | Command::Remesh { .. }
+        | Command::Decimate { .. }
+        | Command::UvUnwrap { .. }
+        | Command::Generate { .. } => unreachable!("handled by Session::run"),
     }
 }
 
@@ -443,6 +1140,7 @@ fn infos(scene: &Scene, ids: &[ObjectId]) -> Result<Vec<ObjectInfo>> {
 mod tests {
     use super::*;
     use crate::primitives::Primitive;
+    use crate::scene::Scene;
 
     fn add(session: &mut Session, shape: Primitive, size_mm: f32) -> ObjectId {
         session
@@ -593,5 +1291,247 @@ mod tests {
         assert_eq!(o.transform, Transform::IDENTITY);
         let after = o.world_bounds().unwrap();
         assert!(before.min.abs_diff_eq(after.min, 1e-7));
+    }
+
+    #[test]
+    fn hollow_leaves_a_printable_shell() {
+        let mut s = Session::new();
+        let id = add(&mut s, Primitive::Cube, 20.0);
+        let out = s
+            .execute(Command::Hollow {
+                objects: None,
+                wall_mm: 2.0,
+                voxel_mm: Some(0.5),
+            })
+            .unwrap();
+        let report = &out.reports[0];
+        assert!(report.printable, "{:?}", report.issues);
+        assert_eq!(report.topology.cavities, 1);
+        // 20³ minus about 16³ mm³.
+        assert!(
+            (report.volume_mm3 - 3904.0).abs() < 300.0,
+            "{}",
+            report.volume_mm3
+        );
+        assert!(s.scene().get(id).unwrap().mesh.triangle_count() > 12);
+        s.execute(Command::Undo).unwrap();
+        assert_eq!(s.scene().get(id).unwrap().mesh.triangle_count(), 12);
+    }
+
+    #[test]
+    fn jobs_run_detached_and_commit_as_one_step() {
+        let mut s = Session::new();
+        let id = add(&mut s, Primitive::Sphere, 20.0);
+        let Step::Job(job) = s
+            .begin(Command::Hollow {
+                objects: None,
+                wall_mm: 2.0,
+                voxel_mm: None,
+            })
+            .unwrap()
+        else {
+            panic!("hollow is a job");
+        };
+        // The scene stays editable while the job runs elsewhere.
+        let handle = std::thread::spawn(move || job.run(&|_, _| {}));
+        s.execute(Command::Translate {
+            objects: None,
+            offset_mm: [1.0, 0.0, 0.0],
+        })
+        .unwrap();
+        let output = handle.join().unwrap().unwrap();
+        s.finish(output).unwrap();
+        assert_eq!(s.undo_labels().last(), Some("Hollow"));
+        assert!(s.scene().get(id).unwrap().transform.translation.x > 0.0);
+    }
+
+    #[test]
+    fn jobs_refuse_to_overwrite_newer_edits() {
+        let mut s = Session::new();
+        add(&mut s, Primitive::Cube, 20.0);
+        let Ok(Step::Job(job)) = s.begin(Command::Hollow {
+            objects: None,
+            wall_mm: 2.0,
+            voxel_mm: Some(1.0),
+        }) else {
+            panic!("hollow is a job");
+        };
+        let output = job.run(&|_, _| {}).unwrap();
+        s.execute(Command::Repair {
+            objects: None,
+            fill_holes: None,
+            remove_small_shells: None,
+        })
+        .unwrap();
+        let err = s.finish(output).unwrap_err().to_string();
+        assert!(err.contains("was edited"), "{err}");
+    }
+
+    #[test]
+    fn engine_commands_explain_missing_engines() {
+        let mut s = Session::new();
+        add(&mut s, Primitive::Cube, 20.0);
+        let err = s
+            .execute(Command::Remesh {
+                objects: None,
+                voxel_mm: 1.0,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Blender"), "{err}");
+        let err = s
+            .execute(Command::Generate {
+                prompt: Some("a cup".into()),
+                image: None,
+                model: None,
+                image_model: None,
+                texture: false,
+                seed: None,
+                faces: None,
+                name: None,
+                size_mm: None,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("generation service"), "{err}");
+        let err = s
+            .execute(Command::ListAssets { query: None })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("library"), "{err}");
+    }
+
+    /// Halves triangle counts by dropping every other triangle.
+    #[derive(Debug)]
+    struct FakeTools;
+
+    impl crate::engine::MeshTools for FakeTools {
+        fn describe(&self) -> String {
+            "fake".into()
+        }
+
+        fn apply(&self, mesh: &Mesh, op: MeshOp) -> std::result::Result<Mesh, String> {
+            let MeshOp::Decimate { ratio } = op else {
+                return Err("unsupported".into());
+            };
+            let keep = ((mesh.triangle_count() as f32) * ratio) as usize;
+            let mut out = mesh.clone();
+            out.indices.truncate(keep * 3);
+            Ok(out)
+        }
+    }
+
+    /// "Generates" a 1 m sphere by writing a GLB.
+    #[derive(Debug)]
+    struct FakeGenerator(std::path::PathBuf);
+
+    impl crate::engine::Generator for FakeGenerator {
+        fn describe(&self) -> String {
+            "fake".into()
+        }
+
+        fn generate(
+            &self,
+            request: &GenerateRequest,
+            progress: Progress<'_>,
+        ) -> std::result::Result<Generated, String> {
+            progress(0.5, "shape");
+            let mut tmp = Scene::default();
+            let id = tmp.add(NewObject {
+                name: "mesh".into(),
+                mesh: crate::primitives::uv_sphere(0.5, 16, 8),
+                transform: Transform::IDENTITY,
+                material: crate::scene::Material::default(),
+            });
+            let path = self.0.join("out.glb");
+            io::export(&path, &[tmp.get(id).unwrap()]).map_err(|e| e.to_string())?;
+            Ok(Generated {
+                path,
+                info: crate::engine::GenerationInfo {
+                    model: "fake".into(),
+                    image_model: None,
+                    prompt: request.prompt.clone(),
+                    seed: request.seed.unwrap_or(7),
+                    textured: false,
+                    seconds: 1.0,
+                    image: None,
+                },
+            })
+        }
+    }
+
+    #[test]
+    fn generated_models_are_named_after_their_subject() {
+        assert_eq!(
+            name_from_prompt("a stone owl statue with big eyes"),
+            "Stone Owl Statue"
+        );
+        assert_eq!(name_from_prompt("The knight, standing"), "Knight");
+        assert_eq!(name_from_prompt("with a hat"), "Generated");
+    }
+
+    #[test]
+    fn generate_adds_saves_and_reloads_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let engines = Engines {
+            mesh_tools: Some(Arc::new(FakeTools)),
+            generator: Some(Arc::new(FakeGenerator(dir.path().to_owned()))),
+            library: Some(Library::open(dir.path().join("library"))),
+        };
+        let mut s = Session::with_engines(engines);
+        let out = s
+            .execute(Command::Generate {
+                prompt: Some("a small round pebble".into()),
+                image: None,
+                model: None,
+                image_model: None,
+                texture: false,
+                seed: Some(3),
+                faces: None,
+                name: None,
+                size_mm: Some(40.0),
+            })
+            .unwrap();
+        let id = out.created[0];
+        let o = s.scene().get(id).unwrap();
+        assert_eq!(o.name, "Small Round Pebble");
+        let b = o.world_bounds().unwrap();
+        assert!((b.size().max_element() - 0.04).abs() < 1e-5);
+        assert!(b.min.y.abs() < 1e-6, "rests on the floor");
+        let saved = out.saved.unwrap();
+        assert_eq!(
+            (saved.name.as_str(), saved.version),
+            ("Small Round Pebble", 1)
+        );
+        assert_eq!(out.generation.unwrap().seed, 3);
+
+        let out = s
+            .execute(Command::Decimate {
+                objects: None,
+                ratio: Some(0.5),
+                triangles: None,
+            })
+            .unwrap();
+        assert!(out.summary.contains("to 112 triangles"), "{}", out.summary);
+
+        s.execute(Command::SaveAsset {
+            name: "small round pebble".into(),
+            objects: None,
+            note: Some("decimated".into()),
+        })
+        .unwrap();
+        let listed = s
+            .execute(Command::ListAssets {
+                query: Some("pebble".into()),
+            })
+            .unwrap();
+        assert_eq!(listed.assets[0].versions.len(), 2);
+        let loaded = s
+            .execute(Command::LoadAsset {
+                name: "Small Round Pebble".into(),
+                version: Some(1),
+            })
+            .unwrap();
+        assert_eq!(loaded.objects[0].triangles, 224);
     }
 }
