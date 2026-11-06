@@ -255,7 +255,8 @@ fn package(
         // uv's answer: no move possible, whatever PyPI has.
         (Some(_), _, Some((text, v))) if v > installed => {
             item = item.latest(text).detail(if allows_any(&p.wanted, &v) {
-                "newer releases don't fit hub-gen's other pins (a package it needs is held back)"
+                "uv keeps it here: another package hub-gen uses doesn't accept newer releases \
+                 yet (with the transformers pin, usually diffusers or a package it needs)"
                     .to_owned()
             } else {
                 format!(

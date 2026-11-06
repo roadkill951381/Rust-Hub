@@ -166,3 +166,18 @@ def test_extras_count_only_when_all_their_packages_are_installed(monkeypatch):
     assert v.extras(reqs) == ["hunyuan"]
     names = {p["name"] for p in v.packages(reqs)}
     assert names == {"fastapi", "numpy"}, "flux's pydantic is not reported"
+
+
+def test_only_missing_weights_are_announced_as_downloads(tmp_path, monkeypatch):
+    from hub_gen import versions as v
+
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
+    monkeypatch.setenv("HY3DGEN_MODELS", str(tmp_path / "none"))
+    assert v.needs_download("hunyuan3d-2")
+    assert not v.needs_download("demo")
+    repo = tmp_path / "models--tencent--Hunyuan3D-2"
+    (repo / "snapshots" / "abc" / "hunyuan3d-dit-v2-0-turbo").mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("abc")
+    assert not v.needs_download("hunyuan3d-2")
+    assert v.needs_download("hunyuan3d-paint")

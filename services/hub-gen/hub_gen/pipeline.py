@@ -65,7 +65,10 @@ class Pipeline:
 
     def _load(self, name: str, kind: Kind, report: Report, at: float) -> Any:
         if name not in self.models.loaded():
-            report(at, f"loading {name} (the first run downloads it)")
+            from hub_gen.versions import needs_download
+
+            extra = " (downloading it first; this happens once)" if needs_download(name) else ""
+            report(at, f"loading {name}{extra}")
         return self.models.get(name, kind)
 
     def run(self, request: GenerateRequest, out: Path, report: Report) -> JobResult:

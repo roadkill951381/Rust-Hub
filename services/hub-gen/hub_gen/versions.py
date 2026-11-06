@@ -162,6 +162,14 @@ def weights() -> list[dict[str, Any]]:
     return list(repos.values())
 
 
+def needs_download(model: str) -> bool:
+    """Whether loading the model will download its weights first."""
+    for w in weights():
+        if model in w["models"]:
+            return model not in w["downloaded"] and not w["copy"]
+    return False
+
+
 def report() -> dict[str, Any]:
     reqs = _requirements()
     active = extras(reqs)
