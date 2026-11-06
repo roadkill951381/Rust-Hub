@@ -1,0 +1,26 @@
+[package]
+name = "hub-app"
+description = "Rust-Hub desktop app: wgpu viewport with egui panels over the shared command layer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "hub-app"
+path = "src/main.rs"
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+glam.workspace = true
+hub-core.workspace = true
+hub-render.workspace = true
+rfd.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wgpu.workspace = true
+
+[lints]
+workspace = true
