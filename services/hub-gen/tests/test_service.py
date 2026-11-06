@@ -250,8 +250,9 @@ def test_only_needed_weight_files_are_downloaded():
         "hunyuan3d-dit-v2-mv-turbo/config.yaml",
         "README.md",
     ]
+    # Paint's UNet loader reads the .bin by name, so there the .bin stays.
     assert needed_files(files, ["hunyuan3d-paint-v2-0-turbo/*"]) == [
-        "hunyuan3d-paint-v2-0-turbo/unet/diffusion_pytorch_model.safetensors",
+        "hunyuan3d-paint-v2-0-turbo/unet/diffusion_pytorch_model.bin",
         "hunyuan3d-paint-v2-0-turbo/text_encoder/pytorch_model.bin",
     ]
     assert needed_files(files, ["hunyuan3d-dit-v2-mv-turbo/*"]) == [
