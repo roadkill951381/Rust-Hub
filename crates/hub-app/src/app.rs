@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, RichText, Ui};
-use hub_core::analysis::{DEFAULT_MIN_WALL_MM, PrintReport};
+use hub_core::analysis::{DEFAULT_MIN_WALL_MM, IGNORED_THIN_FRACTION, PrintReport};
 use hub_core::library::{Asset, AssetSource};
 use hub_core::primitives::Primitive;
 use hub_core::{Command, Material, ObjectId, Outcome, Session, SizeAxis, Step};
@@ -389,19 +389,23 @@ impl HubApp {
     }
 
     fn left_panel(&mut self, ui: &mut Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::CollapsingHeader::new(RichText::new("Generate").heading())
-                .default_open(true)
-                .show(ui, |ui| self.generate_panel(ui));
-            ui.separator();
-            egui::CollapsingHeader::new(RichText::new("Objects").heading())
-                .default_open(true)
-                .show(ui, |ui| self.objects_panel(ui));
-            ui.separator();
-            egui::CollapsingHeader::new(RichText::new("Library").heading())
-                .default_open(true)
-                .show(ui, |ui| self.library_panel(ui));
-        });
+        // Fill the panel instead of sizing to the content, or widgets that
+        // take the available width would widen the panel every frame.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                egui::CollapsingHeader::new(RichText::new("Generate").heading())
+                    .default_open(true)
+                    .show(ui, |ui| self.generate_panel(ui));
+                ui.separator();
+                egui::CollapsingHeader::new(RichText::new("Objects").heading())
+                    .default_open(true)
+                    .show(ui, |ui| self.objects_panel(ui));
+                ui.separator();
+                egui::CollapsingHeader::new(RichText::new("Library").heading())
+                    .default_open(true)
+                    .show(ui, |ui| self.library_panel(ui));
+            });
     }
 
     fn generate_panel(&mut self, ui: &mut Ui) {
@@ -410,7 +414,7 @@ impl HubApp {
             egui::TextEdit::multiline(&mut form.prompt)
                 .hint_text("A knight in plate armour, full body, standing")
                 .desired_rows(3)
-                .desired_width(f32::INFINITY),
+                .desired_width(ui.available_width()),
         );
         ui.horizontal(|ui| {
             let picture = form.image.as_ref().and_then(|p| p.file_name()).map_or_else(
@@ -529,17 +533,19 @@ impl HubApp {
             ui.weak(library.root().display().to_string());
         }
         ui.horizontal(|ui| {
-            let search = ui.add(
-                egui::TextEdit::singleline(&mut self.library.query)
-                    .hint_text("Search")
-                    .desired_width(ui.available_width() - 30.0),
-            );
-            if search.changed() {
-                self.library.stale = true;
-            }
-            if ui.small_button("⟳").on_hover_text("Reload").clicked() {
-                self.library.stale = true;
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Reload").clicked() {
+                    self.library.stale = true;
+                }
+                let search = ui.add(
+                    egui::TextEdit::singleline(&mut self.library.query)
+                        .hint_text("Search")
+                        .desired_width(ui.available_width()),
+                );
+                if search.changed() {
+                    self.library.stale = true;
+                }
+            });
         });
         if let Some(error) = &self.library.error {
             ui.label(RichText::new(error).color(BAD).small());
@@ -549,7 +555,9 @@ impl HubApp {
 
         let mut load = None;
         for asset in &self.library.assets {
-            let title = format!("{}  ·  {} versions", asset.name, asset.versions.len());
+            let count = asset.versions.len();
+            let plural = if count == 1 { "" } else { "s" };
+            let title = format!("{}  ·  {count} version{plural}", asset.name);
             egui::CollapsingHeader::new(title)
                 .id_salt(&asset.slug)
                 .show(ui, |ui| {
@@ -674,7 +682,8 @@ impl HubApp {
             .default_open(true)
             .show(ui, |ui| {
                 let mut position = (transform.translation * 1000.0).to_array();
-                let mut rotation = transform.euler_degrees().to_array();
+                // Adding zero turns -0 into 0, which reads better.
+                let mut rotation = transform.euler_degrees().to_array().map(|v| v + 0.0);
                 let mut scale = transform.scale.to_array();
                 let mut changed = false;
                 egui::Grid::new("transform").num_columns(4).show(ui, |ui| {
@@ -1049,7 +1058,7 @@ fn show_report(ui: &mut Ui, report: &PrintReport) {
             .saturating_sub(report.topology.cavities),
     ));
     if let Some(wall) = &report.wall {
-        let color = if wall.thinnest_mm < wall.min_wall_mm && wall.thin_fraction > 0.001 {
+        let color = if wall.thin_fraction > IGNORED_THIN_FRACTION {
             WARN
         } else {
             ui.visuals().text_color()

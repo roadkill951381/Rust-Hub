@@ -19,6 +19,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+glam.workspace = true
+hub-generate.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util"] }

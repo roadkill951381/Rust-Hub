@@ -67,7 +67,8 @@ impl Default for CheckOptions {
 pub struct WallReport {
     /// The threshold the check used.
     pub min_wall_mm: f32,
-    /// Thinnest wall found, in mm.
+    /// Thinnest wall found, in mm, leaving out the thinnest
+    /// [`IGNORED_THIN_FRACTION`] of the surface.
     pub thinnest_mm: f32,
     /// Surface area whose wall is thinner than `min_wall_mm`.
     pub thin_area_mm2: f64,
@@ -171,7 +172,7 @@ pub fn check_printable_with(object: &Object, options: &CheckOptions) -> PrintRep
         .then(|| wall_thickness(&world, options.min_wall_mm * 0.001))
         .flatten();
     if let Some(w) = &wall
-        && w.thin_fraction > 0.001
+        && w.thin_fraction > IGNORED_THIN_FRACTION
     {
         warnings.push(format!(
             "{:.1}% of the surface ({:.0} mm²) has walls thinner than {} mm, the thinnest {:.2} mm; \
@@ -200,16 +201,25 @@ pub fn check_printable_with(object: &Object, options: &CheckOptions) -> PrintRep
     }
 }
 
+/// Share of the surface, thinnest first, left out of
+/// [`WallReport::thinnest_mm`], and the share of thin surface below which
+/// thin walls are not worth a warning.
+pub const IGNORED_THIN_FRACTION: f64 = 0.001;
+
 /// Measures wall thickness (in the mesh's units) by casting a ray from each
 /// face centre straight into the material and timing its exit.
 ///
 /// The mesh must be closed and outward-facing; faces whose ray never exits are
 /// skipped. Returns `None` for an empty mesh.
+///
+/// The reported thinnest wall ignores the thinnest [`IGNORED_THIN_FRACTION`]
+/// of the surface: sharp creases and remeshing noise give a few tiny faces
+/// absurdly short rays that say nothing about how the part prints.
 pub fn wall_thickness(mesh: &Mesh, min_wall: f32) -> Option<WallReport> {
     let bvh = Bvh::new(mesh);
     let scale = mesh.bounds()?.size().max_element();
     let eps = scale * 1e-5;
-    let mut thinnest = f32::INFINITY;
+    let mut samples: Vec<(f32, f64)> = Vec::with_capacity(mesh.triangle_count());
     let (mut total, mut thin) = (0.0_f64, 0.0_f64);
     for tri in mesh.triangles() {
         let [a, b, c] = tri.map(|i| mesh.positions[i as usize]);
@@ -223,14 +233,22 @@ pub fn wall_thickness(mesh: &Mesh, min_wall: f32) -> Option<WallReport> {
         let Some(hit) = bvh.ray_first(start, -n, eps, f32::INFINITY) else {
             continue;
         };
-        thinnest = thinnest.min(hit.t);
+        samples.push((hit.t, area));
         if hit.t < min_wall {
             thin += area;
         }
     }
-    if !thinnest.is_finite() {
-        return None;
-    }
+    samples.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let ignore = total * IGNORED_THIN_FRACTION;
+    let mut skipped = 0.0;
+    let thinnest = samples
+        .iter()
+        .find(|&&(_, area)| {
+            skipped += area;
+            skipped > ignore
+        })
+        .or(samples.last())?
+        .0;
     Some(WallReport {
         min_wall_mm: min_wall * 1000.0,
         thinnest_mm: thinnest * 1000.0,

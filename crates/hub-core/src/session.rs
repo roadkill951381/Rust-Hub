@@ -745,11 +745,31 @@ fn finish_generation(
     })
 }
 
-/// A short title-case name from the first words of a prompt.
+/// A short title-case name from the first words of a prompt: the subject,
+/// up to the first word that starts a description ("a stone owl with big
+/// eyes" is "Stone Owl").
 fn name_from_prompt(prompt: &str) -> String {
     let words: Vec<String> = prompt
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
+        .take_while(|w| {
+            !matches!(
+                w.to_lowercase().as_str(),
+                "with"
+                    | "in"
+                    | "on"
+                    | "at"
+                    | "and"
+                    | "holding"
+                    | "wearing"
+                    | "sitting"
+                    | "standing"
+                    | "for"
+                    | "from"
+                    | "that"
+                    | "which"
+            )
+        })
         .filter(|w| !matches!(w.to_lowercase().as_str(), "a" | "an" | "the" | "of"))
         .take(4)
         .map(|w| {
@@ -1434,6 +1454,16 @@ mod tests {
                 },
             })
         }
+    }
+
+    #[test]
+    fn generated_models_are_named_after_their_subject() {
+        assert_eq!(
+            name_from_prompt("a stone owl statue with big eyes"),
+            "Stone Owl Statue"
+        );
+        assert_eq!(name_from_prompt("The knight, standing"), "Knight");
+        assert_eq!(name_from_prompt("with a hat"), "Generated");
     }
 
     #[test]

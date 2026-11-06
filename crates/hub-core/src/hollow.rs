@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use glam::Vec3;
 
 use crate::bvh::Bvh;
-use crate::mesh::Mesh;
+use crate::mesh::{Mesh, default_weld_tolerance, weld};
 
 /// Most grid nodes a hollow may use (about 160³), to bound time and memory.
 const MAX_NODES: usize = 4_000_000;
@@ -80,7 +80,10 @@ pub fn cavity(mesh: &Mesh, wall: f32, voxel: Option<f32>) -> Result<(Mesh, Cavit
         }
     });
 
-    let mesh = march(&field, [nx, ny, nz], &at);
+    let mesh = collapse_slivers(
+        &march(&field, [nx, ny, nz], &at),
+        default_weld_tolerance(Some(bounds)),
+    );
     if mesh.triangle_count() == 0 {
         return Err(format!(
             "the model is too thin to hollow with {:.2} mm walls",
@@ -125,6 +128,38 @@ fn fill_row(bvh: &Bvh, row: &mut [f32], start: Vec3, h: f32, wall: f32, band: f3
             *value = -f32::EPSILON * h; // keep the level set off grid nodes
         }
     }
+}
+
+/// Merges vertices closer than `tolerance` and drops the triangles that
+/// collapse. Where the level set passes almost through a grid node, several
+/// edge crossings land on nearly the same point; left alone they make
+/// zero-area triangles that print checks (rightly) flag.
+fn collapse_slivers(mesh: &Mesh, tolerance: f32) -> Mesh {
+    let welded = weld(&mesh.positions, tolerance);
+    let mut out = Mesh {
+        positions: welded.positions,
+        ..Mesh::default()
+    };
+    // A collapse can fold two triangles onto the same three corners, back to
+    // back; such a pair encloses nothing, so both go.
+    let mut seen: HashMap<[u32; 3], usize> = HashMap::new();
+    let mut keep: Vec<Option<[u32; 3]>> = Vec::with_capacity(mesh.triangle_count());
+    for t in mesh.triangles() {
+        let w = t.map(|i| welded.remap[i as usize]);
+        if w[0] == w[1] || w[1] == w[2] || w[0] == w[2] {
+            continue;
+        }
+        let mut key = w;
+        key.sort_unstable();
+        if let Some(&twin) = seen.get(&key) {
+            keep[twin] = None;
+            continue;
+        }
+        seen.insert(key, keep.len());
+        keep.push(Some(w));
+    }
+    out.indices = keep.into_iter().flatten().flatten().collect();
+    out
 }
 
 /// The six tetrahedra of a cube around its 0–7 diagonal (Kuhn triangulation),
@@ -233,6 +268,16 @@ mod tests {
         let b = inner.bounds().unwrap();
         assert!((b.size().x - 0.016).abs() < 0.0005, "{:?}", b.size());
         assert!((info.volume - 0.016_f64.powi(3)).abs() < 0.1 * 0.016_f64.powi(3));
+    }
+
+    #[test]
+    fn curved_cavities_have_no_slivers() {
+        let ball = primitives::uv_sphere(0.03, 48, 24); // 60 mm
+        let (inner, _) = cavity(&ball, 0.002, None).unwrap();
+        let t = topology(&inner);
+        assert!(t.is_watertight(), "{t:?}");
+        assert_eq!(t.degenerate_triangles, 0, "{t:?}");
+        assert_eq!((t.shells, t.flipped_edges), (1, 0), "{t:?}");
     }
 
     #[test]
