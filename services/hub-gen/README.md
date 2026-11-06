@@ -46,6 +46,8 @@ shapes without texture), a current NVIDIA driver, and
 cd services\hub-gen
 uv sync --extra hunyuan            # PyTorch with CUDA 12.8, Hunyuan3D 2, HunyuanDiT
 uv run hub-gen models              # check what is ready
+uv run hub-gen versions            # package versions and cached weight revisions
+uv run hub-gen pull --all          # newest weights for every model downloaded so far
 uv run hub-gen serve               # http://127.0.0.1:8765
 ```
 

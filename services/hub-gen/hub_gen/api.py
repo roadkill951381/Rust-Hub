@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse
@@ -57,6 +58,13 @@ def create_app(settings: Settings) -> FastAPI:
             queued=jobs.waiting(),
             models=[ModelInfo(**m) for m in models.status()],
         )
+
+    @app.get("/v1/versions")
+    def versions() -> dict[str, Any]:
+        """Packages and cached model weights, for the hub's update check."""
+        from hub_gen import versions as v
+
+        return v.report()
 
     @app.post("/v1/jobs", status_code=status.HTTP_202_ACCEPTED)
     def submit(body: GenerateRequest) -> JobView:

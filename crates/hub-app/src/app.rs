@@ -9,6 +9,7 @@ use hub_core::library::{Asset, AssetSource};
 use hub_core::primitives::Primitive;
 use hub_core::{Command, Material, ObjectId, Outcome, Session, SizeAxis, Step};
 
+use crate::updates::UpdatesWindow;
 use crate::viewport::{Click, Viewport};
 use crate::work::{ReportCache, ReportKey, Running};
 
@@ -49,6 +50,7 @@ pub struct HubApp {
     print: PrintSettings,
     generate: GenerateForm,
     library: LibraryView,
+    updates: UpdatesWindow,
     /// Increments for every new drag gesture so each is one undo step.
     gesture: u64,
     rename_buffer: Option<(ObjectId, String)>,
@@ -156,6 +158,7 @@ impl HubApp {
             print: PrintSettings::default(),
             generate: GenerateForm::default(),
             library: LibraryView::default(),
+            updates: UpdatesWindow::default(),
             gesture: 0,
             rename_buffer: None,
         };
@@ -395,6 +398,11 @@ impl HubApp {
                     .clicked()
                 {
                     self.viewport.frame(self.session.scene(), self.selected);
+                }
+            });
+            ui.menu_button("Help", |ui| {
+                if ui.button("Check for updates…").clicked() {
+                    self.updates.check(ui.ctx());
                 }
             });
         });
@@ -1176,5 +1184,8 @@ impl eframe::App for HubApp {
                     None => {}
                 }
             });
+        if self.updates.open {
+            self.updates.show(ui.ctx());
+        }
     }
 }

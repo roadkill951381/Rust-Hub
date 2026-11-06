@@ -74,6 +74,45 @@ def models(args: argparse.Namespace) -> int:
     return 0
 
 
+def versions(args: argparse.Namespace) -> int:
+    import json
+
+    from hub_gen import versions as v
+
+    report = v.report()
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+    print(f"hub-gen {report['version']} in {report['project_dir']}")
+    print(f"extras: {', '.join(report['extras']) or 'none'}")
+    for p in report["packages"]:
+        pin = f"@{p['commit'][:10]}" if p["commit"] else ""
+        print(f"  {p['name']:24} {p['installed'] + pin:24} {p['wanted'] or p['url'] or ''}")
+    for w in report["weights"]:
+        state = w["revision"][:10] if w["revision"] else "not downloaded"
+        print(f"  {w['repo']:52} {state}")
+    return 0
+
+
+def pull(args: argparse.Namespace) -> int:
+    from hub_gen import versions as v
+
+    targets = args.targets
+    if args.all:
+        targets = [w["repo"] for w in v.weights() if w["downloaded"]]
+    if not targets:
+        print("name a model or repo, or pass --all", file=sys.stderr)
+        return 2
+    for target in targets:
+        try:
+            v.pull(target)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 2
+    print("done; restart hub-gen if it is running so it loads the new weights")
+    return 0
+
+
 def generate(args: argparse.Namespace) -> int:
     from hub_gen.backends.base import Models
     from hub_gen.pipeline import Pipeline
@@ -136,6 +175,15 @@ def main(argv: list[str] | None = None) -> None:
     common(p)
     p.add_argument("--licences", action="store_true", help="show each model's licence")
     p.set_defaults(run=models)
+
+    p = sub.add_parser("versions", help="show package and model weight versions")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(run=versions)
+
+    p = sub.add_parser("pull", help="download the newest weights for models, removing the old ones")
+    p.add_argument("targets", nargs="*", metavar="MODEL", help="model names or Hugging Face repos")
+    p.add_argument("--all", action="store_true", help="every repo already downloaded")
+    p.set_defaults(run=pull)
 
     p = sub.add_parser("generate", help="generate one model without the server")
     common(p)

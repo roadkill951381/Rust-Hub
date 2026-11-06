@@ -121,3 +121,25 @@ def test_framing_crops_and_centres():
     rows, cols = np.flatnonzero(alpha.any(1)), np.flatnonzero(alpha.any(0))
     assert abs((rows[0] + rows[-1]) / 2 - 60) <= 1 and abs((cols[0] + cols[-1]) / 2 - 60) <= 1
     assert rows[-1] - rows[0] == pytest.approx(100, abs=2)
+
+
+def test_versions_report_packages_and_cached_weights(client, tmp_path, monkeypatch):
+    cache = tmp_path / "hf"
+    snap = cache / "models--tencent--Hunyuan3D-2" / "snapshots" / "abc123"
+    (snap / "hunyuan3d-dit-v2-0-turbo").mkdir(parents=True)
+    (cache / "models--tencent--Hunyuan3D-2" / "refs").mkdir()
+    (cache / "models--tencent--Hunyuan3D-2" / "refs" / "main").write_text("abc123")
+    monkeypatch.setenv("HF_HUB_CACHE", str(cache))
+    monkeypatch.setenv("HY3DGEN_MODELS", str(tmp_path / "none"))
+
+    body = client.get("/v1/versions").json()
+    names = {p["name"].lower(): p for p in body["packages"]}
+    assert names["fastapi"]["installed"]
+    assert names["fastapi"]["wanted"].startswith(">=")
+    weights = {w["repo"]: w for w in body["weights"]}
+    hunyuan = weights["tencent/Hunyuan3D-2"]
+    assert hunyuan["revision"] == "abc123"
+    assert hunyuan["downloaded"] == ["hunyuan3d-2"]
+    assert set(hunyuan["models"]) == {"hunyuan3d-2", "hunyuan3d-paint"}
+    assert weights["tencent/Hunyuan3D-2mini"]["revision"] is None
+    assert body["project_dir"].endswith("hub-gen")

@@ -104,6 +104,16 @@ enum Cmd {
     },
     /// Run a JSON array of commands from a file, or stdin with "-".
     Run { script: PathBuf },
+    /// Check the hub, hub-gen, model weights, ComfyUI, Blender and tools for
+    /// newer versions, and show how to upgrade each.
+    Updates {
+        /// Run the upgrade of this item, by the id the check shows.
+        #[arg(long, value_name = "ID")]
+        apply: Option<String>,
+        /// Also list what is up to date.
+        #[arg(long)]
+        all: bool,
+    },
     /// Print the JSON Schema of a command, for scripts and agents.
     Schema,
     /// Serve the hub to Claude over MCP on stdin/stdout.
@@ -259,6 +269,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Cmd::Assets { query } => print(json, &session.execute(Command::ListAssets { query })?),
         Cmd::Run { script } => return run_script(&mut session, &script, json),
+        Cmd::Updates { apply, all } => return updates(apply.as_deref(), all, json),
         Cmd::Schema => {
             let schema = schemars::schema_for!(Command);
             println!("{}", serde_json::to_string_pretty(&schema)?);
@@ -272,6 +283,106 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 .map_err(|e| anyhow::anyhow!(e))?;
         }
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn updates(apply: Option<&str>, all: bool, json: bool) -> Result<ExitCode> {
+    use hub_updates::Status;
+
+    eprintln!("checking for updates...");
+    let report = hub_updates::check(&hub_updates::Setup::from_env());
+    if let Some(id) = apply {
+        let Some(item) = report.find(id) else {
+            bail!("no item {id}; run `hub updates --all` to see every id");
+        };
+        let Some(upgrade) = item.upgrade.as_ref().filter(|u| !u.steps.is_empty()) else {
+            bail!(
+                "{} has nothing to run{}",
+                item.name,
+                item.upgrade
+                    .as_ref()
+                    .and_then(|u| u.link.as_deref())
+                    .map(|l| format!("; see {l}"))
+                    .unwrap_or_default()
+            );
+        };
+        if let Some(why) = &item.blocked {
+            bail!("{why}");
+        }
+        if let Some(note) = &upgrade.note {
+            eprintln!("{note}");
+        }
+        if upgrade.rebuilds_hub {
+            // This program is one of the files the build replaces, so the
+            // steps wait for it to exit.
+            let options = hub_updates::LaunchOptions {
+                wait_for: Some(std::process::id()),
+                then_start: None,
+            };
+            let launched = hub_updates::launch(&item.id, &item.name, upgrade, &options)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            match launched.log {
+                Some(log) => eprintln!("updating in the background; output in {}", log.display()),
+                None => eprintln!("updating in a new window"),
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+        hub_updates::run_inline(upgrade).map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!("{} updated", item.name);
+        return Ok(ExitCode::SUCCESS);
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    for piece in &report.pieces {
+        let shown: Vec<_> = piece
+            .items
+            .iter()
+            .filter(|i| all || i.worth_showing())
+            .collect();
+        let hidden = piece.items.len() - shown.len();
+        match &piece.summary {
+            Some(s) => println!("{}: {s}", piece.name),
+            None => println!("{}", piece.name),
+        }
+        for item in shown {
+            let mark = match item.status {
+                Status::Current => "ok  ",
+                Status::Available => "NEW ",
+                Status::HeldBack => "held",
+                Status::NotInstalled => "--  ",
+                Status::Unknown => "?   ",
+            };
+            let versions = match (&item.installed, &item.latest) {
+                (Some(a), Some(b)) if a != b => format!("{a} -> {b}"),
+                (Some(a), _) => a.clone(),
+                (None, Some(b)) => format!("newest {b}"),
+                (None, None) => String::new(),
+            };
+            println!("  [{mark}] {}  {versions}", item.name);
+            if let Some(d) = &item.detail {
+                println!("         {d}");
+            }
+            if let Some(why) = &item.blocked {
+                println!("         {why}");
+            }
+            if item.status != Status::Current
+                && let Some(u) = &item.upgrade
+            {
+                if !u.steps.is_empty() && item.blocked.is_none() {
+                    println!("         run: hub updates --apply {}", item.id);
+                }
+                if let Some(link) = &u.link {
+                    println!("         see: {link}");
+                }
+            }
+        }
+        if hidden > 0 {
+            println!("  {hidden} more up to date or not needed yet (--all shows them)");
+        }
+    }
+    println!("\n{}", report.summary());
     Ok(ExitCode::SUCCESS)
 }
 

@@ -178,6 +178,70 @@ fn builtin(name: &str) -> Option<Value> {
     }
 }
 
+/// A model file a built-in workflow loads, and where it comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelFile {
+    pub name: &'static str,
+    /// Folders under `ComfyUI/models` that ComfyUI looks in, preferred first.
+    pub folders: &'static [&'static str],
+    /// The Hugging Face repo it downloads from, at the repo's top level.
+    pub repo: &'static str,
+    /// The repo needs a sign-in and accepting its licence on the website.
+    pub gated: bool,
+    /// The built-in workflows that load it.
+    pub workflows: &'static [&'static str],
+}
+
+const UNET: &[&str] = &["unet", "diffusion_models"];
+const TEXT: &[&str] = &["text_encoders", "clip"];
+const FLUXES: &[&str] = &[FLUX_SCHNELL, FLUX_DEV];
+
+/// Every file the built-in workflows load.
+pub const MODEL_FILES: &[ModelFile] = &[
+    ModelFile {
+        name: "flux1-schnell-Q8_0.gguf",
+        folders: UNET,
+        repo: "city96/FLUX.1-schnell-gguf",
+        gated: false,
+        workflows: &[FLUX_SCHNELL],
+    },
+    ModelFile {
+        name: "flux1-dev-Q8_0.gguf",
+        folders: UNET,
+        repo: "city96/FLUX.1-dev-gguf",
+        gated: false,
+        workflows: &[FLUX_DEV],
+    },
+    ModelFile {
+        name: "t5xxl_fp8_e4m3fn.safetensors",
+        folders: TEXT,
+        repo: "comfyanonymous/flux_text_encoders",
+        gated: false,
+        workflows: FLUXES,
+    },
+    ModelFile {
+        name: "clip_l.safetensors",
+        folders: TEXT,
+        repo: "comfyanonymous/flux_text_encoders",
+        gated: false,
+        workflows: FLUXES,
+    },
+    ModelFile {
+        name: "ae.safetensors",
+        folders: &["vae"],
+        repo: "black-forest-labs/FLUX.1-schnell",
+        gated: true,
+        workflows: FLUXES,
+    },
+    ModelFile {
+        name: "hunyuan_3d_v2.1.safetensors",
+        folders: &["checkpoints"],
+        repo: "Comfy-Org/hunyuan3D_2.1_repackaged",
+        gated: false,
+        workflows: &[HUNYUAN3D_21],
+    },
+];
+
 /// FLUX through ComfyUI-GGUF's loader, the way a 12 to 16 GB card runs it.
 fn flux(unet: &str, steps: u32, guidance: Option<f32>) -> Value {
     let positive = if guidance.is_some() {
@@ -308,5 +372,25 @@ mod tests {
         assert!(err.contains("Export (API)"), "{err}");
         let err = Workflow::load("nope", Some(dir.path())).unwrap_err();
         assert!(err.contains("nope.json"), "{err}");
+    }
+
+    #[test]
+    fn every_file_a_builtin_loads_is_listed() {
+        for name in [FLUX_SCHNELL, FLUX_DEV, HUNYUAN3D_21] {
+            let graph = builtin(name).unwrap().to_string();
+            let listed: Vec<_> = MODEL_FILES
+                .iter()
+                .filter(|f| f.workflows.contains(&name))
+                .collect();
+            for f in &listed {
+                assert!(graph.contains(f.name), "{name} does not load {}", f.name);
+            }
+            let loads = graph.matches(".gguf").count() + graph.matches(".safetensors").count();
+            assert_eq!(
+                loads,
+                listed.len(),
+                "{name} loads a file MODEL_FILES misses"
+            );
+        }
     }
 }

@@ -43,6 +43,50 @@ pub struct Health {
     pub models: Vec<ModelInfo>,
 }
 
+/// What the service runs on, from `/v1/versions` or `hub-gen versions --json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Versions {
+    pub version: String,
+    /// The `services/hub-gen` folder uv manages.
+    pub project_dir: PathBuf,
+    pub python: PathBuf,
+    /// Installed extras, for `uv sync --extra`.
+    #[serde(default)]
+    pub extras: Vec<String>,
+    pub packages: Vec<Package>,
+    pub weights: Vec<Weights>,
+}
+
+/// One of hub-gen's direct dependencies, as installed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Package {
+    pub name: String,
+    pub installed: String,
+    /// The range `pyproject.toml` allows, e.g. `>=4.48,<5`; empty for a git pin.
+    #[serde(default)]
+    pub wanted: String,
+    /// A direct reference, e.g. `git+https://github.com/o/r@<commit>`.
+    pub url: Option<String>,
+    /// The extra that pulls it in, if any.
+    pub extra: Option<String>,
+    /// The installed commit, for packages installed from git.
+    pub commit: Option<String>,
+}
+
+/// A Hugging Face repo that models load weights from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Weights {
+    pub repo: String,
+    pub models: Vec<String>,
+    /// The commit in the local cache; `None` when never downloaded.
+    pub revision: Option<String>,
+    /// The models whose files are in the cache.
+    #[serde(default)]
+    pub downloaded: Vec<String>,
+    /// A manual copy that hy3dgen loads instead of the cache.
+    pub copy: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct JobRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,6 +200,11 @@ impl Client {
     /// Checks the service is up and lists its models.
     pub fn health(&self) -> Result<Health, String> {
         self.get_json("/health")
+    }
+
+    /// The service's packages and cached model weights, for update checks.
+    pub fn versions(&self) -> Result<Versions, String> {
+        self.get_json("/v1/versions")
     }
 
     fn authorize<B>(&self, req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {

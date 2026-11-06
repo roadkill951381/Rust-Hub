@@ -20,7 +20,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use hub_core::engine::{GenerateRequest, Generated, GenerationInfo, Generator, Progress};
 use serde_json::{Value, json};
 
-pub use workflows::{FLUX_DEV, FLUX_SCHNELL, HUNYUAN3D_21, Makes, Workflow};
+pub use workflows::{
+    FLUX_DEV, FLUX_SCHNELL, HUNYUAN3D_21, MODEL_FILES, Makes, ModelFile, Workflow,
+};
 
 /// Where ComfyUI listens unless `HUB_COMFY_URL` says otherwise.
 pub const DEFAULT_URL: &str = "http://127.0.0.1:8188";
@@ -81,6 +83,37 @@ impl Config {
             free_after: var("HUB_COMFY_KEEP_LOADED")
                 .is_none_or(|v| matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no")),
         }
+    }
+}
+
+/// Where ComfyUI is installed, for update checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Installation {
+    /// The folder with `main.py`, `models` and `custom_nodes`.
+    pub app: PathBuf,
+    /// The portable build's folder (with `python_embeded` and `update`).
+    pub portable: Option<PathBuf>,
+    /// The Python that runs it.
+    pub python: PathBuf,
+}
+
+impl Config {
+    /// The ComfyUI install in [`Config::dir`], if one is there.
+    pub fn installation(&self) -> Option<Installation> {
+        let launch = Launch::find(self.dir.as_deref()?, 0)?;
+        let portable = launch
+            .args
+            .iter()
+            .any(|a| a == "--windows-standalone-build");
+        Some(Installation {
+            app: if portable {
+                launch.cwd.join("ComfyUI")
+            } else {
+                launch.cwd.clone()
+            },
+            portable: portable.then_some(launch.cwd),
+            python: launch.program,
+        })
     }
 }
 

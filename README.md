@@ -124,6 +124,29 @@ that only saves images makes pictures.
 | `HUB_COMFY_KEEP_LOADED` | off | Keep ComfyUI's models on the GPU after a job |
 | `HUB_IMAGE_MODEL` / `HUB_SHAPE_MODEL` | none | Defaults for every request, e.g. `HUB_IMAGE_MODEL=comfyui` |
 
+### Keep everything up to date
+
+Help > Check for updates in the app (or `hub updates`, or the MCP tool
+`check_updates`) checks every piece and shows the installed and newest
+version of each, with an Update button where the hub can do it for you. Each
+update runs in a window of its own so you can watch it.
+
+| Piece | Compared with | Update |
+|---|---|---|
+| Rust-Hub | its git remote, and the commit this build came from | `git pull`, then a rebuild; the app closes and reopens itself |
+| hub-gen's Python packages | PyPI, within the ranges in `pyproject.toml` | `uv sync --upgrade-package <name>` (stop hub-gen first) |
+| Model weights (Hunyuan3D, HunyuanDiT, ...) | the repo's commits on Hugging Face | `hub-gen pull <repo>`, which also deletes the old copy |
+| ComfyUI | its latest GitHub release | the portable build's own updater, or `git pull` (close ComfyUI first) |
+| ComfyUI custom nodes | their git remotes | `git pull`; nodes not installed from git are listed but not checked |
+| ComfyUI model files the built-in workflows load | present or missing | download into the right `models` folder |
+| Blender | download.blender.org | `winget upgrade`, or blender.org |
+| uv, Rust, NVIDIA driver | uv's releases, `rustup check` | `uv self update`, `rustup update`; the driver through the NVIDIA app |
+
+"Held back" means a newer version exists but Rust-Hub pins the one it was
+tested with, such as transformers below 5 and the Hunyuan3D-2 code commit.
+Set `HUB_GITHUB_TOKEN` if GitHub's limit of 60 anonymous checks an hour runs
+out, and `HF_TOKEN` for gated Hugging Face models.
+
 ### Connect Claude
 
 Claude Code:
@@ -171,6 +194,7 @@ GPU works.
 | `hub-blender` | Runs mesh jobs in Blender in the background (`MeshTools`). |
 | `hub-generate` | HTTP client for the hub-gen service (`Generator`). |
 | `hub-comfy` | Drives the person's ComfyUI and its workflows (`Generator`, and pictures for hub-gen). |
+| `hub-updates` | Checks every piece for newer versions and runs their upgrades. |
 | `hub-engines` | Picks the engines from the environment, so every front end behaves the same. |
 | `services/hub-gen` | The generation service itself, in Python (PyTorch). |
 | `hub-render` | wgpu renderer used by the app and by headless previews. |

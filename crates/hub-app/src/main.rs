@@ -3,6 +3,7 @@
 //! Usage: `hub-app [model files…]`
 
 mod app;
+mod updates;
 mod viewport;
 mod work;
 

@@ -738,6 +738,20 @@ impl HubServer {
     }
 
     #[tool(
+        description = "Check every piece Rust-Hub runs on for newer versions: the hub itself, hub-gen's Python packages, model weights, ComfyUI with its custom nodes and model files, Blender, uv, Rust and the NVIDIA driver. Changes nothing. Each item has a status (current, available, held_back, not_installed, unknown) and, when it can move forward, the exact upgrade commands with their folders. Ask the person before running any of them: some download gigabytes, and hub-gen or ComfyUI must be stopped first when `blocked` says so."
+    )]
+    async fn check_updates(&self) -> Result<CallToolResult, McpError> {
+        let report =
+            tokio::task::spawn_blocking(|| hub_updates::check(&hub_updates::Setup::from_env()))
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let body = serde_json::json!({ "summary": report.summary(), "pieces": report.pieces });
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            serde_json::to_string_pretty(&body).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(
         description = "Render the scene to a PNG so you can see it. Back faces show red, which reveals holes and flipped faces. The grid spacing is a power of ten in metres."
     )]
     async fn render_preview(

@@ -1,0 +1,23 @@
+[package]
+name = "hub-updates"
+description = "Checks every piece of Rust-Hub (the hub, hub-gen, model weights, ComfyUI, Blender, tools) for newer versions, and runs their upgrades."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hub-blender.workspace = true
+hub-comfy.workspace = true
+hub-generate.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+ureq = { version = "3.5", default-features = false, features = ["json", "rustls", "gzip", "platform-verifier"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tiny_http = "0.12"
+
+[lints]
+workspace = true
