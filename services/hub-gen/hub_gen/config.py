@@ -8,7 +8,12 @@ from pathlib import Path
 
 
 def _default_output() -> Path:
-    base = os.environ.get("XDG_CACHE_HOME") or os.environ.get("LOCALAPPDATA")
+    if os.name == "nt":
+        # Not under AppData: Windows quietly moves AppData writes from the
+        # Microsoft Store's Python into its own package folder, so the jobs
+        # would not be where the log says.
+        return Path.home() / "RustHub" / "hub-gen" / "jobs"
+    base = os.environ.get("XDG_CACHE_HOME")
     root = Path(base) if base else Path.home() / ".cache"
     return root / "hub-gen" / "jobs"
 

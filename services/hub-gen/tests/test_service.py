@@ -258,3 +258,23 @@ def test_only_needed_weight_files_are_downloaded():
         "hunyuan3d-dit-v2-mv-turbo/model.fp16.safetensors",
         "hunyuan3d-dit-v2-mv-turbo/config.yaml",
     ]
+
+
+def test_only_bundled_custom_pipelines_are_trusted(tmp_path):
+    from hub_gen.trust import trusted_pipelines_in
+
+    class Pipeline:
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):
+            return cls, path, kwargs.get("trust_remote_code")
+
+    bundled = tmp_path / "hy3dgen" / "hunyuanpaint"
+    bundled.mkdir(parents=True)
+    elsewhere = tmp_path / "other"
+    elsewhere.mkdir()
+    with trusted_pipelines_in(tmp_path / "hy3dgen", Pipeline):
+        assert Pipeline.from_pretrained("w", custom_pipeline=str(bundled)) == (Pipeline, "w", True)
+        assert Pipeline.from_pretrained("w", custom_pipeline=str(elsewhere))[2] is None
+        assert Pipeline.from_pretrained("w", custom_pipeline="org/remote")[2] is None
+        assert Pipeline.from_pretrained("w")[2] is None
+    assert Pipeline.from_pretrained("w", custom_pipeline=str(bundled))[2] is None

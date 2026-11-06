@@ -39,8 +39,9 @@ const PICTURE_STYLE: &str = ", a single complete object, full view, centered, pl
                              background, soft even studio lighting, no shadows, high detail";
 
 /// Words for a whole standing figure that a rig can be fitted to.
-const FIGURE_STYLE: &str = "full-length shot of the whole body from head to toes, feet \
-                            fully visible, empty space above the head and below the feet, \
+const FIGURE_STYLE: &str = "full colour photo, full-length shot of the whole body from head \
+                            to toes, feet fully visible, empty space above the head and below \
+                            the feet, \
                             standing straight in an A-pose with the arms held away from the \
                             body and the hands open, plain light grey background, soft even \
                             studio lighting, no shadows, high detail";
@@ -51,8 +52,9 @@ const SHEET_STYLE: &str = "character turnaround reference sheet, the same charac
                            front view, side view facing left, back view";
 
 /// How much of a pose guide a picture repaints: enough to turn a grey
-/// mannequin into a dressed person, little enough to keep its pose and place.
-pub const POSE_DENOISE: f32 = 0.82;
+/// mannequin into a dressed person in colour (0.82 left the clothes grey),
+/// little enough to keep its pose and place.
+pub const POSE_DENOISE: f32 = 0.88;
 
 /// What a workflow makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

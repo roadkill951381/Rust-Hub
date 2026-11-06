@@ -4,6 +4,8 @@ from Hugging Face on first use into the usual cache."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import trimesh
 from PIL import Image
 
@@ -11,6 +13,7 @@ from hub_gen.backends.base import Views
 from hub_gen.config import Settings
 from hub_gen.hfdownload import exact_downloads
 from hub_gen.progress import Report
+from hub_gen.trust import trusted_pipelines_in
 
 
 class HunyuanShape:
@@ -86,9 +89,12 @@ class HunyuanShape:
 
 class HunyuanPaint:
     def __init__(self, settings: Settings, *, repo: str, subfolder: str) -> None:
+        import hy3dgen
         from hy3dgen.texgen import Hunyuan3DPaintPipeline
 
-        with exact_downloads():
+        # Paint's multiview pipeline is code in hy3dgen's own package folder.
+        bundled = Path(hy3dgen.__file__).parent
+        with exact_downloads(), trusted_pipelines_in(bundled):
             self.pipe = Hunyuan3DPaintPipeline.from_pretrained(repo, subfolder=subfolder)
         if settings.low_vram:
             self.pipe.enable_model_cpu_offload()
