@@ -421,6 +421,17 @@ fn character_kit_from_a_stand_in_human() {
         |accessor: &Value| gltf["accessors"][accessor.as_u64().unwrap() as usize]["count"].clone();
     assert!(count(&prim["attributes"]["POSITION"]).as_u64().unwrap() >= 24 * 15);
 
+    // The hub itself can load it (the _HIDE attribute is a custom one).
+    assert!(
+        !hub_core::io::import(&dir.path().join("female/body.glb"))
+            .unwrap()
+            .is_empty()
+    );
+    // Cut-outs are MASK and two-sided, everything else opaque.
+    for m in gltf["materials"].as_array().unwrap() {
+        assert!(m["alphaMode"].is_null() || m["alphaMode"] == "MASK", "{m}");
+    }
+
     // Rebuilding one body keeps the other in kit.json.
     blender
         .build_kit(&KitRequest {

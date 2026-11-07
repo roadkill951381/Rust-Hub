@@ -69,6 +69,11 @@ KIT_FORMAT = 1
 MIN_MOVE = 1e-5
 # Bone moves smaller than this (metres) are left out of kit.json.
 MIN_BONE_MOVE = 2e-4
+# A vertex a morph moves less than this (metres) is left still, so morphs that
+# touch only the face are stored sparse rather than for every vertex.
+VERTEX_NOISE = 1e-4
+# Skin closer than this (metres) under a piece of clothing counts as covered.
+COVER = 0.02
 # Target sliders run from -1 to 1 unless the recipe says otherwise.
 TARGET_RANGE = (-1.0, 1.0)
 
@@ -261,7 +266,77 @@ def export_glb(path, objects, arm):
         export_animations=False,
         export_image_format="AUTO",  # hair and brows are cut-outs: PNG keeps their alpha
     )
+    # Blender writes BLEND for any material with its alpha linked, which MPFB's all are: in a game that sorts
+    # badly (teeth through lips, hair missing). Solid things are OPAQUE, cut-outs MASK and two-sided.
+    cutouts = {m.name for o in objects for m in o.data.materials if m and is_cutout(o, m)}
+    set_alpha_modes(path, cutouts)
     return os.path.getsize(path)
+
+
+def is_cutout(obj, mat):
+    """A material whose base colour texture has see-through texels (hair cards, brows, lashes)."""
+    if not mat.node_tree:
+        return False
+    for n in mat.node_tree.nodes:
+        if n.type == "TEX_IMAGE" and n.image and n.image.channels == 4 and n.image.size[0] > 0:
+            a = pixels(n.image)[..., 3]
+            if (a < 0.5).mean() > 0.01:
+                return True
+    return False
+
+
+def set_alpha_modes(path, cutouts):
+    """Rewrites a GLB's materials: names in ``cutouts`` MASK (cut at 0.5) and double-sided, the rest OPAQUE."""
+    import struct
+
+    with open(path, "rb") as f:
+        data = f.read()
+    n = struct.unpack_from("<I", data, 12)[0]
+    gltf = json.loads(data[20 : 20 + n])
+    rest = data[20 + n :]
+    for m in gltf.get("materials", []):
+        if m.get("name") in cutouts:
+            m["alphaMode"] = "MASK"
+            m["alphaCutoff"] = 0.5
+            m["doubleSided"] = True
+        else:
+            m.pop("alphaMode", None)
+            m.pop("alphaCutoff", None)
+    chunk = json.dumps(gltf, separators=(",", ":")).encode()
+    chunk += b" " * (-len(chunk) % 4)
+    out = struct.pack("<4sII", b"glTF", 2, 12 + 8 + len(chunk) + len(rest)) + struct.pack("<I4s", len(chunk), b"JSON") + chunk + rest
+    with open(path, "wb") as f:
+        f.write(out)
+
+
+def covered_vertices(body_co, keep, part_co, part, cover):
+    """Body vertices a piece of clothing covers: within ``cover`` of its surface (under it, or poking
+    through it), and not near its open edges (cuffs, collar, hems), where the skin must still show."""
+    from mathutils import Vector, kdtree
+    from mathutils.bvhtree import BVHTree
+
+    polys = [list(p.vertices) for p in part.data.polygons]
+    if not polys:
+        return set()
+    tree = BVHTree.FromPolygons([tuple(v) for v in part_co], polys)
+    bm = bmesh.new()
+    bm.from_mesh(part.data)
+    edge = sorted({v.index for e in bm.edges if e.is_boundary for v in e.verts})
+    bm.free()
+    kd = kdtree.KDTree(max(1, len(edge)))
+    for i in edge:
+        kd.insert(Vector(part_co[i]), i)
+    kd.balance()
+    out = set()
+    for i in np.where(keep)[0]:
+        v = Vector(body_co[i])
+        hit = tree.find_nearest(v, cover)
+        if hit[0] is None:
+            continue
+        if edge and kd.find(hit[0])[2] < 2 * cover:
+            continue
+        out.add(int(i))
+    return out
 
 
 # ── sources of humans ─────────────────────────────────────────────────────────
@@ -713,7 +788,10 @@ def build_body(recipe, body_id, out_dir, source, log):
             moved = {}
             for key, co in snap["meshes"].items():
                 d = co - base["meshes"][key]
-                if d.shape == co.shape and np.abs(d).max() > MIN_MOVE:
+                if d.shape != co.shape:
+                    continue
+                d[np.linalg.norm(d, axis=1) < VERTEX_NOISE] = 0.0
+                if np.abs(d).max() > MIN_MOVE:
                     moved[key] = d
             if not moved:
                 continue
@@ -739,8 +817,12 @@ def build_body(recipe, body_id, out_dir, source, log):
     part_bits = {}
     bit = 0
     for (slot, asset_id) in human.parts:
-        verts = source.delete_vertices(human, slot, asset_id)
-        verts = [v for v in verts if v < len(hide)]
+        verts = set(v for v in source.delete_vertices(human, slot, asset_id) if v < len(hide))
+        cover = slots[slot].get("cover", COVER if slots[slot].get("kind", "clothes") == "clothes" else 0)
+        if cover:
+            part = human.parts[(slot, asset_id)]
+            verts |= covered_vertices(base["meshes"]["body"], human.keep, base["meshes"]["part:%s:%s" % (slot, asset_id)], part, cover)
+        verts = sorted(verts)
         if not verts:
             continue
         if bit >= 23:

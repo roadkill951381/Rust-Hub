@@ -27,7 +27,7 @@ eframe = { version = "0.37", default-features = false, features = ["wgpu", "defa
 egui = "0.37"
 egui-wgpu = "0.37"
 glam = { version = "0.34", features = ["serde", "bytemuck"] }
-gltf = { version = "1.4", default-features = false, features = ["import", "names", "utils"] }
+gltf = { version = "1.4", default-features = false, features = ["import", "names", "utils", "extras"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 pollster = "1.0"
 quick-xml = "0.42"
