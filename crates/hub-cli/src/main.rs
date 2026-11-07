@@ -153,6 +153,28 @@ enum Cmd {
         #[arg(long)]
         seed: Option<u64>,
     },
+    /// Bring a rigged character's colours to a game character's levels: its
+    /// skin and clothes are each darkened or lightened, keeping their hues, to
+    /// the brightness of the same parts of LIKE. Can also shrink the texture.
+    MatchColours {
+        /// The rigged, textured character (.glb).
+        model: PathBuf,
+        /// The game's own character (.glb), usually the one it was rigged like.
+        #[arg(long)]
+        like: PathBuf,
+        /// Where to write the result (.glb).
+        #[arg(short, long)]
+        output: PathBuf,
+        /// How far to go, 0 to 1 (1 by default matches the brightness).
+        #[arg(long)]
+        strength: Option<f32>,
+        /// Shrink the texture to at most this many pixels a side, e.g. 1024.
+        #[arg(long)]
+        max_texture: Option<u32>,
+        /// Write the texture as a JPEG, several times smaller than a PNG.
+        #[arg(long)]
+        jpeg: bool,
+    },
     /// List the asset library, optionally only names containing QUERY.
     Assets { query: Option<String> },
     /// Render a model to a PNG with the viewport renderer.
@@ -391,6 +413,27 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     prompt,
                     repaint,
                     seed,
+                },
+            )?,
+        ),
+        Cmd::MatchColours {
+            model,
+            like,
+            output,
+            strength,
+            max_texture,
+            jpeg,
+        } => print(
+            json,
+            &run_with_progress(
+                &mut session,
+                Command::MatchColours {
+                    model,
+                    like,
+                    output,
+                    strength,
+                    max_texture,
+                    jpeg,
                 },
             )?,
         ),

@@ -232,6 +232,40 @@ pub struct RigReport {
     pub note: Option<String>,
 }
 
+/// Bring a rigged model's colours to a game character's levels (see
+/// [`Rigger::match_colours`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ColourRequest {
+    /// A rigged, textured model (.glb), as [`Rigger::rig`] writes it.
+    pub model: PathBuf,
+    /// A rigged character (.glb) whose skin and clothes brightness to match,
+    /// usually the one the model was rigged like.
+    pub like: PathBuf,
+    pub output: PathBuf,
+    /// 1 matches the brightness, 0 changes nothing.
+    pub strength: f32,
+    /// Shrink the texture to at most this many pixels a side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_size: Option<u32>,
+    /// Write the texture as a JPEG, several times smaller than a PNG.
+    #[serde(default)]
+    pub jpeg: bool,
+}
+
+/// What [`Rigger::match_colours`] did.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ColourReport {
+    /// How much the skin was scaled, in linear light (below 1 is darker).
+    pub skin_factor: f32,
+    /// How much the clothes (and hair) were scaled.
+    pub clothes_factor: f32,
+    /// The texture's width and height as written.
+    pub texture_size: [u32; 2],
+    /// Why a part was left as it was, e.g. the reference has no skin material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 /// Rigs models like an existing character.
 pub trait Rigger: Send + Sync + fmt::Debug {
     /// Name and version for messages, e.g. "Blender 5.2.3".
@@ -264,6 +298,15 @@ pub trait Rigger: Send + Sync + fmt::Debug {
     /// model with its new texture to `output`. Returns how many texels it
     /// painted.
     fn project_face(&self, model: &Path, picture: &Path, output: &Path) -> Result<usize, String>;
+
+    /// Writes `request.output`: the model with its skin and its clothes each
+    /// scaled, as a whole and keeping their hues, to the brightness of the
+    /// same parts of `request.like`, and its texture shrunk to
+    /// `request.max_size`.
+    fn match_colours(&self, request: &ColourRequest) -> Result<ColourReport, String> {
+        let _ = request;
+        Err(format!("{} cannot match colours", self.describe()))
+    }
 }
 
 /// The engines available to a session. Cheap to clone.

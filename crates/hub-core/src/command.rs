@@ -249,6 +249,30 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seed: Option<u64>,
     },
+    /// Bring a rigged, textured character (.glb, as `Rig` writes it) to a
+    /// game character's colour levels: its skin and its clothes are each
+    /// darkened or lightened, keeping their hues, to the brightness of the
+    /// same parts of `like` (generated textures are often much lighter than
+    /// the albedo a game's lights expect). Can also shrink the texture.
+    /// Writes `output` and adds it to the scene to look at.
+    MatchColours {
+        model: PathBuf,
+        /// The game's own character (.glb), usually the one the model was
+        /// rigged like.
+        like: PathBuf,
+        output: PathBuf,
+        /// How far to go, from 0 to 1: 1 (the default) matches the
+        /// brightness, less keeps more of the model's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        strength: Option<f32>,
+        /// Shrink the texture to at most this many pixels a side.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_texture: Option<u32>,
+        /// Write the texture as a JPEG (quality 90), several times smaller
+        /// than a PNG; for textures without transparency.
+        #[serde(default)]
+        jpeg: bool,
+    },
     /// Save objects as a new version of a library asset.
     SaveAsset {
         name: String,
@@ -317,6 +341,7 @@ impl Command {
                 | Command::Generate { .. }
                 | Command::Rig { .. }
                 | Command::SharpenFace { .. }
+                | Command::MatchColours { .. }
         )
     }
 
@@ -342,6 +367,7 @@ impl Command {
             Command::Generate { .. } => "Generate",
             Command::Rig { .. } => "Rig",
             Command::SharpenFace { .. } => "Sharpen face",
+            Command::MatchColours { .. } => "Match colours",
             Command::SaveAsset { .. } => "Save asset",
             Command::LoadAsset { .. } => "Load asset",
             Command::ListAssets { .. } => "List assets",

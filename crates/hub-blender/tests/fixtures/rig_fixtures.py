@@ -1,12 +1,15 @@
 """Builds a rigged reference character and an unrigged 'generated' model,
 for the rigging test in `blender_jobs.rs`.
 
-blender -b --python rig_fixtures.py -- OUTDIR [arm_deg_ref] [arm_deg_model] [turn]
+blender -b --python rig_fixtures.py -- OUTDIR [arm_deg_ref] [arm_deg_model] [turn] [beard|shadow]
 
 The reference is a capsule figure on a mixamorig-named skeleton in an A-pose,
 with a short idle action. The model is fatter, holds its arms at another
 angle, is textured skin on the head and hands and dark elsewhere, and can face
-the other way, like a generated character.
+the other way, like a generated character. With ``beard``, its skin is dark
+brown, its clothes dark grey, and a darker beard covers the lower face. With
+``shadow``, one side of the face is in shadow, painted into the texture as
+generated textures often have it.
 """
 
 import math
@@ -24,6 +27,8 @@ out = args[0]
 ref_angle = float(args[1]) if len(args) > 1 else 47.0
 model_angle = float(args[2]) if len(args) > 2 else 32.0
 turn = len(args) > 3 and args[3] == "turn"
+beard = len(args) > 4 and args[4] == "beard"
+shadow = len(args) > 4 and args[4] == "shadow"
 
 BONES = {
     # name: (head, tail, parent)
@@ -147,13 +152,35 @@ bpy.ops.export_scene.gltf(
 bpy.ops.wm.read_factory_settings(use_empty=True)
 bones = {**BONES, **arm_bones(model_angle)}
 me = capsule_body(bones, scale=1.15)
+# A dark lock of hair hanging down the middle of the face, in front of it, as
+# generated characters often have: skin detection must not take its colour.
+strand = bmesh.new()
+strand.from_mesh(me)
+bmesh.ops.create_cube(
+    strand,
+    size=1.0,
+    matrix=Matrix.Translation((0.0, -0.132, 1.65)) @ Matrix.Diagonal((0.024, 0.01, 0.3, 1.0)),
+)
+strand.to_mesh(me)
+strand.free()
 obj = bpy.data.objects.new("generated", me)
 bpy.context.scene.collection.objects.link(obj)
 img = bpy.data.images.new("tex", 256, 256)
+SKIN = (0.35, 0.26, 0.22) if beard else (0.80, 0.60, 0.50)
+CLOTHES = (0.25, 0.245, 0.245) if beard else (0.12, 0.12, 0.14)
+BEARD = (0.16, 0.11, 0.09)
 px = []
-for _y in range(256):
+for y in range(256):
     for x in range(256):
-        px += [0.80, 0.60, 0.50, 1.0] if x < 128 else [0.12, 0.12, 0.14, 1.0]
+        # The beard: the front of the head (u up to 0.23), chin to nose
+        # (v 0.23 to 0.44; see the UVs below).
+        if beard and x < 60 and 60 <= y <= 112:
+            px += [*BEARD, 1.0]
+        elif shadow and x < 30:
+            # One side of the face at 40% of the skin's brightness.
+            px += [*(0.4 * c for c in SKIN), 1.0]
+        else:
+            px += [*SKIN, 1.0] if x < 128 else [*CLOTHES, 1.0]
 img.pixels = px
 img.pack()
 obj.data.materials.append(material("generated", image=img))
@@ -169,7 +196,9 @@ for poly in me.polygons:
     xs = sum(me.vertices[v].co.x for v in poly.vertices) / len(poly.vertices)
     for li, v in zip(poly.loop_indices, poly.vertices, strict=True):
         co = me.vertices[v].co
-        if z > 1.5:
+        if min(me.vertices[w].co.y for w in poly.vertices) < -0.125:
+            uv.data[li].uv = (0.75, 0.5)  # the lock of hair
+        elif z > 1.5:
             # The head gets its own texels, the front and back side by side,
             # so a face can be painted onto it.
             u = (0.0 if poly.normal.y < 0 else 0.25) + 0.02 + 0.21 * clip((co.x + 0.15) / 0.3)

@@ -180,7 +180,17 @@ model you already have, and `hub sharpen-face rigged.glb --face portrait.png
 --prompt "..." -o faced.glb` runs step 4 alone (`--repaint` from 0 to 1: more
 is sharper and more like the portrait, less keeps the model's features where
 they are). In the app these options are under Generate > Character; Claude
-has them on the `generate`, `rig` and `sharpen_face` tools.
+has them on the `generate`, `rig`, `sharpen_face` and `match_colours` tools.
+
+Generated textures carry the colours of evenly lit pictures, which under a
+game's lights often look washed out next to its own characters.
+`hub match-colours rigged.glb --like character.glb -o matched.glb` darkens or
+lightens the skin and the clothes, each as a whole and keeping their hues, to
+the brightness of the same parts of the game's character (`--strength` from
+0 to 1 goes part of the way; the clothes move at most from 0.15 to 2 times
+their brightness, the skin from 0.6 to 1.4). `--max-texture 1024` shrinks the
+texture to the game's size and `--jpeg` writes it as a JPEG, several times
+smaller. Run it last, after `sharpen-face`.
 
 ### Keep everything up to date
 

@@ -655,8 +655,268 @@ def project_face(job):
     return {"painted_texels": painted, "triangles": len(candidates)}
 
 
-def replace_texture(path, output, png):
-    """Copies a GLB with its base colour image(s) replaced by one PNG."""
+# --- Matching a game character's colours -------------------------------------
+#
+# Generated textures carry the colours of evenly lit pictures, often much
+# lighter than the albedo a game's lights were tuned for. ``match_colours``
+# scales a rigged model's skin and its clothes (each as a whole, in linear
+# light, so hues stay) to the brightness of the same parts of a reference
+# character, and can shrink the texture to the game's size.
+
+#: Materials that are neither skin nor clothes: eyes, brows, teeth...
+NOT_SKIN_OR_CLOTHES = ("eye", "brow", "lash", "teeth", "tongue", "low-poly")
+
+#: How far ``match_colours`` may darken or lighten each part, in linear
+#: light. Skin moves less: its tone comes from the portrait, and a beard or
+#: stubble in the skin material can skew its measure.
+COLOUR_FACTOR_LIMITS = {"skin": (0.6, 1.4), "clothes": (0.15, 2.0)}
+
+#: JPEG quality for ``match_colours`` textures written as JPEG.
+JPEG_QUALITY = 90
+
+
+def srgb_to_linear(c):
+    import numpy as np
+
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def linear_to_srgb(c):
+    import numpy as np
+
+    c = np.clip(c, 0.0, 1.0)
+    return np.where(c <= 0.0031308, c * 12.92, 1.055 * c ** (1 / 2.4) - 0.055)
+
+
+def luminance(linear):
+    return linear[..., 0] * 0.2126 + linear[..., 1] * 0.7152 + linear[..., 2] * 0.0722
+
+
+def material_part(name):
+    """'skin', 'clothes' or None (eyes and the like) for a material name."""
+    low = name.lower()
+    if any(word in low for word in NOT_SKIN_OR_CLOTHES):
+        return None
+    return "skin" if low.endswith(".body") else "clothes"
+
+
+def material_image(mat):
+    """A material's base colour as (texture array or None, linear RGB)."""
+    import numpy as np
+
+    if mat is None or not mat.use_nodes:
+        return None, np.ones(3)
+    for node in mat.node_tree.nodes:
+        if node.type == "BSDF_PRINCIPLED":
+            socket = node.inputs["Base Color"]
+            links = socket.links
+            if links and links[0].from_node.type == "TEX_IMAGE" and links[0].from_node.image:
+                image = links[0].from_node.image
+                w, h = image.size
+                px = np.empty(w * h * 4, dtype=np.float32)
+                image.pixels.foreach_get(px)
+                return px.reshape(h, w, 4), np.ones(3)
+            return None, np.array(socket.default_value[:3], dtype=np.float64)
+    return None, np.ones(3)
+
+
+def weighted_median(values, weights):
+    import numpy as np
+
+    order = np.argsort(values)
+    cumulative = np.cumsum(weights[order])
+    return float(values[order][np.searchsorted(cumulative, cumulative[-1] / 2)])
+
+
+def part_brightness(objects):
+    """The median linear luminance of the skin and of the clothes over the
+    surface of ``objects``, weighting each face by its area: the median, so a
+    beard, a belt or a shadow doesn't move it much."""
+    import numpy as np
+
+    found = {"skin": ([], []), "clothes": ([], [])}
+    for obj in objects:
+        mesh = obj.data
+        n = len(mesh.polygons)
+        if n == 0:
+            continue
+        area = np.empty(n)
+        mesh.polygons.foreach_get("area", area)
+        index = np.empty(n, dtype=np.int64)
+        mesh.polygons.foreach_get("material_index", index)
+        for slot_index, slot in enumerate(obj.material_slots):
+            part = material_part(slot.material.name if slot.material else "")
+            faces = np.flatnonzero(index == slot_index)
+            if part is None or len(faces) == 0:
+                continue
+            image, colour = material_image(slot.material)
+            if image is not None:
+                colours = face_colours(obj, image)
+                if colours is None:
+                    continue
+                lum = luminance(srgb_to_linear(colours[faces].astype(np.float64)))
+            else:
+                lum = np.full(len(faces), luminance(colour))
+            found[part][0].append(lum)
+            found[part][1].append(area[faces])
+    out = {}
+    for part, (lums, areas) in found.items():
+        lums = np.concatenate(lums) if lums else np.zeros(0)
+        areas = np.concatenate(areas) if areas else np.zeros(0)
+        out[part] = weighted_median(lums, areas) if areas.sum() > 0 else None
+    return out
+
+
+def uv_cover(obj, faces, size):
+    """Which texels of a (h, w) texture the UVs of ``faces`` cover, including
+    a texel of margin so texture filtering sees no seam."""
+    import numpy as np
+
+    h, w = size
+    mask = np.zeros((h, w), dtype=bool)
+    mesh = obj.data
+    uv_layer = mesh.uv_layers.active
+    if uv_layer is None:
+        return mask
+    uv = np.empty(len(mesh.loops) * 2, dtype=np.float32)
+    uv_layer.data.foreach_get("uv", uv)
+    uv = uv.reshape(-1, 2) % 1.0 * (w, h) - 0.5
+    wanted = set(int(f) for f in faces)
+    mesh.calc_loop_triangles()
+    for tri in mesh.loop_triangles:
+        if tri.polygon_index not in wanted:
+            continue
+        q = uv[list(tri.loops)].astype(np.float64)
+        x0, y0 = np.maximum(np.floor(q.min(axis=0) - 1).astype(int), 0)
+        x1, y1 = np.minimum(np.ceil(q.max(axis=0) + 1).astype(int), (w - 1, h - 1))
+        if x1 < x0 or y1 < y0:
+            continue
+        a, b, c = q
+        area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        if abs(area) < 1e-9:
+            continue
+        gx, gy = np.meshgrid(np.arange(x0, x1 + 1), np.arange(y0, y1 + 1))
+        bary = np.stack(
+            [
+                ((b[0] - gx) * (c[1] - gy) - (b[1] - gy) * (c[0] - gx)) / area,
+                ((c[0] - gx) * (a[1] - gy) - (c[1] - gy) * (a[0] - gx)) / area,
+                ((a[0] - gx) * (b[1] - gy) - (a[1] - gy) * (b[0] - gx)) / area,
+            ],
+            axis=-1,
+        )
+        edges = np.linalg.norm(q[[1, 2, 0]] - q[[2, 0, 1]], axis=1)
+        inside = np.all(bary > -(edges / abs(area)), axis=-1)
+        mask[gy[inside], gx[inside]] = True
+    return mask
+
+
+def box_blur(a, radius):
+    import numpy as np
+
+    for axis in (0, 1):
+        padded = np.pad(a, [(radius, radius) if i == axis else (0, 0) for i in range(2)], "edge")
+        total = np.cumsum(padded, axis=axis, dtype=np.float64)
+        total = np.concatenate([np.zeros_like(np.take(total, [0], axis=axis)), total], axis=axis)
+        n = a.shape[axis]
+        a = (
+            np.take(total, np.arange(2 * radius + 1, n + 2 * radius + 1), axis=axis)
+            - np.take(total, np.arange(0, n), axis=axis)
+        ) / (2 * radius + 1)
+    return a
+
+
+def match_colours(job):
+    """Writes the rigged model with its skin and clothes as bright as the
+    reference's (``strength`` 1 matches them, 0 changes nothing), and its
+    texture no larger than ``max_size`` pixels a side, as a JPEG with
+    ``jpeg``."""
+    import os
+
+    import numpy as np
+
+    params = job.get("params", {})
+    strength = float(params.get("strength", 1.0))
+    max_size = params.get("max_size")
+    jpeg = bool(params.get("jpeg"))
+
+    _arm, like = load_reference(params["like"])
+    target = part_brightness(like)
+    _arm, skinned = load_reference(job["input"])
+    current = part_brightness(skinned)
+    texture = None
+    for obj in skinned:
+        for slot in obj.material_slots:
+            image, _colour = material_image(slot.material)
+            if image is not None:
+                texture = image
+                break
+        if texture is not None:
+            break
+    if texture is None:
+        raise ValueError("the model has no texture to change")
+
+    factors, notes = {}, []
+    for part in ("skin", "clothes"):
+        lo, hi = COLOUR_FACTOR_LIMITS[part]
+        if target[part] and current[part]:
+            ratio = target[part] / current[part]
+            factors[part] = float(np.clip(ratio, lo, hi) ** strength)
+        else:
+            factors[part] = 1.0
+            whose = "the reference" if not target[part] else "the model"
+            notes.append(
+                f"{whose} has no {part} material (<name>.body is skin), so the {part} was kept"
+            )
+
+    th, tw = texture.shape[:2]
+    skin = np.zeros((th, tw), dtype=bool)
+    for obj in skinned:
+        index = np.empty(len(obj.data.polygons), dtype=np.int64)
+        obj.data.polygons.foreach_get("material_index", index)
+        for slot_index, slot in enumerate(obj.material_slots):
+            name = slot.material.name if slot.material else ""
+            if material_part(name) == "skin":
+                skin |= uv_cover(obj, np.flatnonzero(index == slot_index), (th, tw))
+    factor = np.where(skin, factors["skin"], factors["clothes"])
+    # Soften the step where skin meets clothes on the texture, over about a
+    # hundredth of its width.
+    factor = box_blur(factor, max(1, tw // 200))
+    rgb = linear_to_srgb(srgb_to_linear(texture[..., :3].astype(np.float64)) * factor[..., None])
+    texture = np.concatenate([rgb, texture[..., 3:]], axis=-1).astype(np.float32)
+
+    image = bpy.data.images.new("matched", tw, th, alpha=True)
+    image.pixels.foreach_set(np.ascontiguousarray(texture).ravel())
+    if max_size and max(tw, th) > int(max_size):
+        scale = int(max_size) / max(tw, th)
+        image.scale(max(1, round(tw * scale)), max(1, round(th * scale)))
+    size = list(image.size)
+    tmp = job["output"] + (".texture.jpg" if jpeg else ".texture.png")
+    image.filepath_raw = tmp
+    if jpeg:
+        image.file_format = "JPEG"
+        image.save(quality=JPEG_QUALITY)
+    else:
+        image.file_format = "PNG"
+        image.save()
+    with open(tmp, "rb") as f:
+        data = f.read()
+    os.remove(tmp)
+    replace_texture(job["input"], job["output"], data, "image/jpeg" if jpeg else "image/png")
+    report = {
+        "skin_factor": round(factors["skin"], 3),
+        "clothes_factor": round(factors["clothes"], 3),
+        "texture_size": size,
+        "skin_brightness": [current["skin"], target["skin"]],
+        "clothes_brightness": [current["clothes"], target["clothes"]],
+    }
+    if notes:
+        report["note"] = "; ".join(notes)
+    return report
+
+
+def replace_texture(path, output, png, mime="image/png"):
+    """Copies a GLB with its base colour image(s) replaced by one picture
+    (PNG unless ``mime`` says otherwise)."""
     doc, binary = read_glb(path)
     sources = {
         doc["textures"][m["pbrMetallicRoughness"]["baseColorTexture"]["index"]]["source"]
@@ -669,7 +929,7 @@ def replace_texture(path, output, png):
         data = png if i in replaced else view_bytes(doc, binary, i)
         out.add(data, view.get("target"), view.get("byteStride"))
     for i in sources:
-        doc["images"][i]["mimeType"] = "image/png"
+        doc["images"][i]["mimeType"] = mime
     write_glb(doc, out, output)
 
 
@@ -979,6 +1239,26 @@ def face_colours(obj, image):
     return image[y, x, :3]
 
 
+def face_tone(seen):
+    """The skin tone among colours seen on the front of the head (0..1 RGB,
+    one row each). A beard, a moustache, eyebrows or hair can cover most of
+    the face, and they are darker than its skin, so: keep the colours in the
+    usual range of human skin (Cr 133-173 and Cb 77-127 in YCbCr; zombies'
+    grey-green skin falls outside it, and then every colour counts), and of
+    those, the brightest quarter. Eye whites, teeth and shine fall outside
+    the range, so they don't count as the brightest."""
+    import numpy as np
+
+    rgb = seen * 255.0
+    cr = 128 + 0.439 * rgb[:, 0] - 0.368 * rgb[:, 1] - 0.071 * rgb[:, 2]
+    cb = 128 - 0.148 * rgb[:, 0] - 0.291 * rgb[:, 1] + 0.439 * rgb[:, 2]
+    human = (cr >= 133) & (cr <= 173) & (cb >= 77) & (cb <= 127)
+    if human.sum() >= 3:
+        seen = seen[human]
+    brightest = np.argsort(seen.sum(axis=1))[-max(3, len(seen) // 4) :]
+    return np.median(seen[brightest], axis=0)
+
+
 def skin_faces(obj, arm):
     """Which faces show skin: those coloured like the middle of the face.
     Returns (bool per face, a note when it could not tell)."""
@@ -998,12 +1278,20 @@ def skin_faces(obj, arm):
     mw = arm.matrix_world
     top = mw @ head.tail_local
     base = mw @ head.head_local
-    aim = base.lerp(top, 0.35)
+    # The face's colour, from a grid of rays at the front of the head, so a
+    # strand of hair, an eye or the lips crossing one ray doesn't decide it.
     toward = Vector((0.0, 1.0, 0.0))
-    hit, _loc, _normal, index = obj.ray_cast(aim - 2.0 * toward, toward)
-    if not hit:
+    side = Vector((1.0, 0.0, 0.0)) * (top - base).length
+    seen = []
+    for up in (0.2, 0.3, 0.4, 0.5, 0.6):
+        for across in (-0.25, -0.12, 0.0, 0.12, 0.25):
+            start = base.lerp(top, up) + side * across - 2.0 * toward
+            hit, _loc, normal, index = obj.ray_cast(start, toward)
+            if hit and normal.y < -0.3:
+                seen.append(colours[index])
+    if not seen:
         return np.zeros(n, dtype=bool), "could not find the face to sample skin colour"
-    tone = colours[index]
+    tone = face_tone(np.array(seen))
 
     def chroma(c):
         total = c.sum(axis=-1, keepdims=True) + 1e-6
@@ -1013,7 +1301,21 @@ def skin_faces(obj, arm):
     got, level = chroma(colours)
     close = np.linalg.norm(got - want, axis=1) < 0.035
     lit = (level > bright * 0.55) & (level < bright * 1.6)
-    skin = close & lit
+    raw = close & lit
+    # On the head, generated textures carry shadow: cheeks, eye sockets and
+    # stubble down to a third of the face's brightness, their hue shifted.
+    # Hair is darker still (about a tenth) and grey or neutral, so there a
+    # warm colour from a quarter of the face's brightness up counts as skin.
+    neck = next(
+        (b for b in arm.data.bones if b.name.lower().replace("mixamorig:", "") == "neck"), head
+    )
+    centres = np.empty(n * 3)
+    obj.data.polygons.foreach_get("center", centres)
+    # The model is in world space (see join_world), like the bones here.
+    above = centres.reshape(n, 3)[:, 2] > (mw @ neck.head_local).z
+    warm = got[:, 0] - got[:, 1] > 0.05
+    shaded = (level > bright * 0.25) & (level < bright * 1.6)
+    skin = raw = raw | (above & warm & shaded & (np.linalg.norm(got - want, axis=1) < 0.1))
     # Smooth out speckles: a face follows the majority of its neighbours.
     edges = {}
     for poly in obj.data.polygons:
@@ -1026,6 +1328,9 @@ def skin_faces(obj, arm):
     for _ in range(2):
         votes = np.array([skin[nb].mean() if nb else skin[i] for i, nb in enumerate(neighbours)])
         skin = np.where(votes > 0.5, True, np.where(votes < 0.5, False, skin))
+    if not skin.any() and raw.any():
+        # Skin only in small patches (a low-poly face): keep them all.
+        skin = raw
     return skin, None
 
 
@@ -1450,6 +1755,8 @@ def main():
             report.update(face_view(job))
         elif op == "project_face":
             report.update(project_face(job))
+        elif op == "match_colours":
+            report.update(match_colours(job))
         elif op != "version":
             if op not in OPS:
                 raise ValueError(f"unknown operation {op!r}")

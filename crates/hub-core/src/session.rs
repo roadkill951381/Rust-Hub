@@ -9,7 +9,8 @@ use glam::{Mat4, Quat, Vec3};
 use crate::analysis::{self, CheckOptions, RepairOptions};
 use crate::command::{Command, ObjectInfo, Outcome, SavedAsset, SizeAxis};
 use crate::engine::{
-    Engines, FaceRequest, GenerateRequest, Generated, MeshOp, Progress, RigReport, RigRequest,
+    ColourReport, ColourRequest, Engines, FaceRequest, GenerateRequest, Generated, MeshOp,
+    Progress, RigReport, RigRequest,
 };
 use crate::error::{Error, Result};
 use crate::hollow;
@@ -496,6 +497,38 @@ impl Session {
                     seed,
                 }
             }
+            Command::MatchColours {
+                model,
+                like,
+                output,
+                strength,
+                max_texture,
+                jpeg,
+            } => {
+                rigger(&self.engines)?;
+                must_exist(&model)?;
+                must_exist(&like)?;
+                if let Some(s) = strength
+                    && !(0.0..=1.0).contains(&s)
+                {
+                    return Err(Error::InvalidArgument(format!(
+                        "strength is from 0 to 1, got {s}"
+                    )));
+                }
+                if max_texture == Some(0) {
+                    return Err(Error::InvalidArgument(
+                        "max_texture must be at least 1 pixel".into(),
+                    ));
+                }
+                Work::Colours(ColourRequest {
+                    model,
+                    like,
+                    output,
+                    strength: strength.unwrap_or(1.0),
+                    max_size: max_texture,
+                    jpeg,
+                })
+            }
             other => unreachable!("{} is not a job", other.label()),
         };
         Ok(Job {
@@ -561,6 +594,7 @@ enum Work {
         repaint: f32,
         seed: Option<u64>,
     },
+    Colours(ColourRequest),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -595,6 +629,10 @@ enum WorkResult {
     Rigged {
         request: RigRequest,
         report: RigReport,
+    },
+    Coloured {
+        request: ColourRequest,
+        report: ColourReport,
     },
     Face {
         model: PathBuf,
@@ -735,6 +773,14 @@ impl Job {
                     size_mm,
                 }
             }
+            Work::Colours(request) => {
+                progress(0.0, "matching the colours in Blender");
+                let report = rigger(&self.engines)?
+                    .match_colours(&request)
+                    .map_err(Error::Engine)?;
+                progress(1.0, "done");
+                WorkResult::Coloured { request, report }
+            }
             Work::Rig(request) => {
                 progress(0.0, "rigging like the reference character");
                 let report = rigger(&self.engines)?
@@ -817,6 +863,30 @@ impl JobOutput {
                 size_mm,
             } => finish_generation(scene, engines, generated, name.as_deref(), *size_mm),
             WorkResult::Rigged { request, report } => finish_rig(scene, engines, request, report),
+            WorkResult::Coloured { request, report } => {
+                let created = add_file(scene, engines, &request.output)?;
+                let [w, h] = report.texture_size;
+                let note = report
+                    .note
+                    .as_deref()
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default();
+                Ok(Outcome {
+                    summary: format!(
+                        "Matched {} to {}'s colours: skin x{:.2}, clothes x{:.2} \
+                         in linear light{note}, texture {w}x{h}; wrote {}",
+                        file_name(&request.model),
+                        file_name(&request.like),
+                        report.skin_factor,
+                        report.clothes_factor,
+                        request.output.display()
+                    ),
+                    objects: infos(scene, &created)?,
+                    created,
+                    path: Some(request.output.clone()),
+                    ..Outcome::default()
+                })
+            }
             WorkResult::Face {
                 model,
                 output,
@@ -1463,7 +1533,8 @@ fn apply(scene: &mut Scene, command: Command, engines: &Engines) -> Result<Outco
         | Command::UvUnwrap { .. }
         | Command::Generate { .. }
         | Command::Rig { .. }
-        | Command::SharpenFace { .. } => unreachable!("handled by Session::run"),
+        | Command::SharpenFace { .. }
+        | Command::MatchColours { .. } => unreachable!("handled by Session::run"),
     }
 }
 
@@ -2019,6 +2090,20 @@ mod tests {
             Ok(4096)
         }
 
+        /// Copies the model, as if its colours had been matched.
+        fn match_colours(
+            &self,
+            request: &crate::engine::ColourRequest,
+        ) -> std::result::Result<crate::engine::ColourReport, String> {
+            std::fs::copy(&request.model, &request.output).map_err(|e| e.to_string())?;
+            Ok(crate::engine::ColourReport {
+                skin_factor: 0.5 * request.strength,
+                clothes_factor: 0.25,
+                texture_size: [request.max_size.unwrap_or(2048); 2],
+                note: None,
+            })
+        }
+
         fn rig(
             &self,
             request: &crate::engine::RigRequest,
@@ -2186,5 +2271,57 @@ mod tests {
             "face view redrawn as a person at 0.4"
         );
         assert!(dir.path().join("mei-face-view.png").exists());
+    }
+
+    #[test]
+    fn match_colours_writes_the_model_with_game_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("claire-face.glb");
+        let mut tmp = Scene::default();
+        let id = tmp.add(NewObject {
+            name: "claire".into(),
+            mesh: crate::primitives::uv_sphere(0.5, 16, 8),
+            transform: Transform::IDENTITY,
+            material: crate::scene::Material::default(),
+        });
+        io::export(&model, &[tmp.get(id).unwrap()]).unwrap();
+        let output = dir.path().join("claire-game.glb");
+        let command = |strength, max_texture| Command::MatchColours {
+            model: model.clone(),
+            like: model.clone(),
+            output: output.clone(),
+            strength,
+            max_texture,
+            jpeg: true,
+        };
+        let mut s = Session::with_engines(Engines {
+            rigger: Some(Arc::new(FakeRigger)),
+            ..Engines::default()
+        });
+        let err = s.execute(command(Some(1.5), None)).unwrap_err().to_string();
+        assert!(err.contains("from 0 to 1"), "{err}");
+        let err = s.execute(command(None, Some(0))).unwrap_err().to_string();
+        assert!(err.contains("at least 1"), "{err}");
+
+        let out = s.execute(command(None, Some(1024))).unwrap();
+        assert!(
+            out.summary.contains("skin x0.50, clothes x0.25")
+                && out.summary.contains("texture 1024x1024"),
+            "{}",
+            out.summary
+        );
+        assert_eq!(out.path.as_deref(), Some(output.as_path()));
+        assert_eq!(out.created.len(), 1);
+        assert!(
+            Command::MatchColours {
+                model: model.clone(),
+                like: model,
+                output,
+                strength: None,
+                max_texture: None,
+                jpeg: false,
+            }
+            .is_job()
+        );
     }
 }

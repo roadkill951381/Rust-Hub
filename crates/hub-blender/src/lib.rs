@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use hub_core::engine::{MeshOp, MeshTools, RigReport, RigRequest, Rigger};
+use hub_core::engine::{
+    ColourReport, ColourRequest, MeshOp, MeshTools, RigReport, RigRequest, Rigger,
+};
 use hub_core::scene::{Material, Object, ObjectId, Transform};
 use hub_core::{Mesh, io};
 use serde::Deserialize;
@@ -362,6 +364,27 @@ impl Rigger for Blender {
             .and_then(serde_json::Value::as_u64)
             .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX)))
     }
+
+    fn match_colours(&self, request: &ColourRequest) -> Result<ColourReport, String> {
+        let output = absolute_dir(&request.output)?;
+        let like = std::path::absolute(&request.like)
+            .map_err(|e| format!("could not resolve {}: {e}", request.like.display()))?;
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let report = self.run(
+            dir.path(),
+            "match_colours",
+            Input::File(&request.model),
+            Some(&output),
+            &json!({
+                "like": like,
+                "strength": request.strength,
+                "max_size": request.max_size,
+                "jpeg": request.jpeg,
+            }),
+        )?;
+        serde_json::from_value(serde_json::Value::Object(report.rest))
+            .map_err(|e| format!("unreadable colour report from Blender: {e}"))
+    }
 }
 
 /// A [`Blender`] found on first use, so front ends can start instantly and a
@@ -417,6 +440,10 @@ impl Rigger for LazyBlender {
 
     fn project_face(&self, model: &Path, picture: &Path, output: &Path) -> Result<usize, String> {
         self.get()?.project_face(model, picture, output)
+    }
+
+    fn match_colours(&self, request: &ColourRequest) -> Result<ColourReport, String> {
+        self.get()?.match_colours(request)
     }
 }
 
