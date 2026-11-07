@@ -9,8 +9,8 @@ use glam::{Mat4, Quat, Vec3};
 use crate::analysis::{self, CheckOptions, RepairOptions};
 use crate::command::{Command, ObjectInfo, Outcome, SavedAsset, SizeAxis};
 use crate::engine::{
-    ColourReport, ColourRequest, Engines, FaceRequest, GenerateRequest, Generated, MeshOp,
-    Progress, RigReport, RigRequest,
+    ColourReport, ColourRequest, Engines, FaceRequest, GenerateRequest, Generated, KitReport,
+    KitRequest, MeshOp, Progress, RigReport, RigRequest,
 };
 use crate::error::{Error, Result};
 use crate::hollow;
@@ -21,6 +21,9 @@ use crate::scene::{NewObject, Object, ObjectId, Scene, Transform};
 
 const MM: f32 = 0.001;
 const DEFAULT_HISTORY: usize = 200;
+/// A kit body left further than this from its base shape (mm) after its
+/// sliders were put back has morphs that are off.
+const KIT_DRIFT_MM: f32 = 0.5;
 
 /// The scene plus undo/redo. All front ends drive the hub through [`Session::execute`].
 ///
@@ -529,6 +532,24 @@ impl Session {
                     jpeg,
                 })
             }
+            Command::BuildCharacterKit {
+                recipe,
+                output,
+                bodies,
+            } => {
+                rigger(&self.engines)?;
+                must_exist(&recipe)?;
+                if bodies.as_ref().is_some_and(Vec::is_empty) {
+                    return Err(Error::InvalidArgument(
+                        "bodies, when given, must name at least one body".into(),
+                    ));
+                }
+                Work::Kit(KitRequest {
+                    recipe,
+                    output,
+                    bodies,
+                })
+            }
             other => unreachable!("{} is not a job", other.label()),
         };
         Ok(Job {
@@ -595,6 +616,7 @@ enum Work {
         seed: Option<u64>,
     },
     Colours(ColourRequest),
+    Kit(KitRequest),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -633,6 +655,10 @@ enum WorkResult {
     Coloured {
         request: ColourRequest,
         report: ColourReport,
+    },
+    Kit {
+        request: KitRequest,
+        report: KitReport,
     },
     Face {
         model: PathBuf,
@@ -781,6 +807,14 @@ impl Job {
                 progress(1.0, "done");
                 WorkResult::Coloured { request, report }
             }
+            Work::Kit(request) => {
+                progress(0.0, "building the character kit in Blender");
+                let report = rigger(&self.engines)?
+                    .build_kit(&request)
+                    .map_err(Error::Engine)?;
+                progress(1.0, "done");
+                WorkResult::Kit { request, report }
+            }
             Work::Rig(request) => {
                 progress(0.0, "rigging like the reference character");
                 let report = rigger(&self.engines)?
@@ -884,6 +918,63 @@ impl JobOutput {
                     objects: infos(scene, &created)?,
                     created,
                     path: Some(request.output.clone()),
+                    ..Outcome::default()
+                })
+            }
+            WorkResult::Kit { request, report } => {
+                let mut created = Vec::new();
+                for (i, body) in report.bodies.iter().enumerate() {
+                    let path = request.output.join(&body.name).join("body.glb");
+                    let ids = add_file(scene, engines, &path)?;
+                    // Side by side, a metre apart, rather than inside each other.
+                    #[allow(clippy::cast_precision_loss, reason = "a handful of bodies")]
+                    let offset_mm = [1000.0 * i as f32, 0.0, 0.0];
+                    if i > 0 {
+                        apply(
+                            scene,
+                            Command::Translate {
+                                objects: Some(ids.clone()),
+                                offset_mm,
+                            },
+                            engines,
+                        )?;
+                    }
+                    created.extend(ids);
+                }
+                let bodies: Vec<String> = report
+                    .bodies
+                    .iter()
+                    .map(|b| {
+                        format!(
+                            "{} ({} triangles, {} morphs, {} parts)",
+                            b.name, b.triangles, b.morphs, b.parts
+                        )
+                    })
+                    .collect();
+                let drift = report
+                    .bodies
+                    .iter()
+                    .filter(|b| b.drift_mm > KIT_DRIFT_MM)
+                    .map(|b| format!("{} {:.2} mm", b.name, b.drift_mm))
+                    .collect::<Vec<_>>();
+                let warning = if drift.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; check the sliders: putting them back left the body off by {}",
+                        drift.join(", ")
+                    )
+                };
+                Ok(Outcome {
+                    summary: format!(
+                        "Built the character kit {} in {:.0} s: {}{warning}",
+                        report.kit.display(),
+                        report.seconds,
+                        bodies.join("; ")
+                    ),
+                    objects: infos(scene, &created)?,
+                    created,
+                    path: Some(report.kit.clone()),
                     ..Outcome::default()
                 })
             }
@@ -1534,7 +1625,8 @@ fn apply(scene: &mut Scene, command: Command, engines: &Engines) -> Result<Outco
         | Command::Generate { .. }
         | Command::Rig { .. }
         | Command::SharpenFace { .. }
-        | Command::MatchColours { .. } => unreachable!("handled by Session::run"),
+        | Command::MatchColours { .. }
+        | Command::BuildCharacterKit { .. } => unreachable!("handled by Session::run"),
     }
 }
 
@@ -2104,6 +2196,44 @@ mod tests {
             })
         }
 
+        fn build_kit(
+            &self,
+            request: &crate::engine::KitRequest,
+        ) -> std::result::Result<crate::engine::KitReport, String> {
+            let names = request
+                .bodies
+                .clone()
+                .unwrap_or_else(|| vec!["female".into(), "male".into()]);
+            let mut bodies = Vec::new();
+            for (i, name) in names.iter().enumerate() {
+                let dir = request.output.join(name);
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                let mut tmp = Scene::default();
+                let id = tmp.add(NewObject {
+                    name: format!("{name}.body"),
+                    mesh: crate::primitives::uv_sphere(0.3, 12, 6),
+                    transform: Transform::IDENTITY,
+                    material: crate::scene::Material::default(),
+                });
+                io::export(&dir.join("body.glb"), &[tmp.get(id).unwrap()])
+                    .map_err(|e| e.to_string())?;
+                bodies.push(crate::engine::KitBody {
+                    name: name.clone(),
+                    triangles: 144,
+                    morphs: 40,
+                    parts: 12,
+                    drift_mm: if i == 1 { 0.8 } else { 0.0 },
+                });
+            }
+            let kit = request.output.join("kit.json");
+            std::fs::write(&kit, "{}").map_err(|e| e.to_string())?;
+            Ok(crate::engine::KitReport {
+                kit,
+                seconds: 90.0,
+                bodies,
+            })
+        }
+
         fn rig(
             &self,
             request: &crate::engine::RigRequest,
@@ -2271,6 +2401,48 @@ mod tests {
             "face view redrawn as a person at 0.4"
         );
         assert!(dir.path().join("mei-face-view.png").exists());
+    }
+
+    #[test]
+    fn a_character_kit_is_built_and_its_bodies_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let recipe = dir.path().join("humans.json");
+        let output = dir.path().join("kit");
+        let command = |bodies: Option<Vec<String>>| Command::BuildCharacterKit {
+            recipe: recipe.clone(),
+            output: output.clone(),
+            bodies,
+        };
+        assert!(command(None).is_job() && command(None).is_edit());
+
+        let mut s = Session::new();
+        let err = s.execute(command(None)).unwrap_err().to_string();
+        assert!(err.contains("Blender"), "a missing engine says so: {err}");
+
+        let mut s = Session::with_engines(Engines {
+            rigger: Some(Arc::new(FakeRigger)),
+            ..Engines::default()
+        });
+        let err = s.execute(command(None)).unwrap_err().to_string();
+        assert!(err.contains("humans.json"), "{err}");
+        std::fs::write(&recipe, "{}").unwrap();
+        let err = s.execute(command(Some(vec![]))).unwrap_err().to_string();
+        assert!(err.contains("at least one body"), "{err}");
+
+        let out = s.execute(command(None)).unwrap();
+        assert!(
+            out.summary
+                .contains("female (144 triangles, 40 morphs, 12 parts)")
+                && out.summary.contains("male 0.80 mm"),
+            "{}",
+            out.summary
+        );
+        assert_eq!(out.path, Some(output.join("kit.json")));
+        assert_eq!(out.created.len(), 2);
+        let x = |i: usize| out.objects[i].center_mm[0];
+        assert!((x(1) - x(0) - 1000.0).abs() < 1.0, "side by side");
+        s.execute(Command::Undo).unwrap();
+        assert!(s.scene().is_empty(), "one undo takes the bodies away");
     }
 
     #[test]

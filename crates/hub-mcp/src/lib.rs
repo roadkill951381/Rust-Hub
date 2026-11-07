@@ -346,6 +346,18 @@ pub struct MatchColoursArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct BuildCharacterKitArgs {
+    /// Absolute path of the kit recipe (.json), e.g. cgen's recipes/kits/humans.json.
+    pub recipe: PathBuf,
+    /// Absolute path of the folder to write the kit to.
+    pub output: PathBuf,
+    /// Build only these bodies (names from the recipe, such as `female`),
+    /// keeping the others already in the kit.
+    #[serde(default)]
+    pub bodies: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SaveAssetArgs {
     pub name: String,
     #[serde(default)]
@@ -799,6 +811,22 @@ impl HubServer {
         self.run_job(command, context).await
     }
 
+    #[tool(
+        description = "Build a character kit for an in-game character customizer from a kit recipe. For each base body (e.g. male and female) it writes one rigged body (the 52-bone Mixamo skeleton) with every slider in the recipe (weight, muscle, jaw, nose, ...) baked in as a pair of glTF morph targets, the hair styles, outfits, shoes and hats that go on it as separate GLBs rigged to the same skeleton and following the same morphs, the extra skin textures, and kit.json, which games read through cgen's character-kit module. Needs desktop Blender with the MPFB extension and MakeHuman's CC0 assets; a full kit takes several minutes. Adds the bodies to the scene."
+    )]
+    async fn build_character_kit(
+        &self,
+        Parameters(a): Parameters<BuildCharacterKitArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let command = Command::BuildCharacterKit {
+            recipe: a.recipe,
+            output: a.output,
+            bodies: a.bodies,
+        };
+        self.run_job(command, context).await
+    }
+
     #[tool(description = "Save objects as a new version of a named asset in the library.")]
     async fn save_asset(
         &self,
@@ -965,8 +993,6 @@ impl HubServer {
     }
 }
 
-// `tool_handler` generates `async fn call_tool` without an `.await`.
-#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for HubServer {
     fn get_info(&self) -> ServerConfig {

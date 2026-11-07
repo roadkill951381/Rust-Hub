@@ -848,7 +848,7 @@ mod tests {
         assert!((report.volume_mm3 - 8000.0).abs() < 1e-2);
         let wall = report.wall.unwrap();
         assert!((wall.thinnest_mm - 20.0).abs() < 1e-3, "{wall:?}");
-        assert_eq!(wall.thin_area_mm2, 0.0);
+        assert!(wall.thin_area_mm2.abs() < f64::EPSILON, "{wall:?}");
     }
 
     #[test]

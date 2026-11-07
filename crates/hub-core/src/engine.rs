@@ -266,6 +266,46 @@ pub struct ColourReport {
     pub note: Option<String>,
 }
 
+/// Build a character kit for an in-game character customizer (see
+/// [`Rigger::build_kit`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct KitRequest {
+    /// The kit recipe (.json): its bodies, sliders and parts.
+    pub recipe: PathBuf,
+    /// The folder to write the kit to: `kit.json`, then a folder per body
+    /// with `body.glb`, its skins and a GLB per part.
+    pub output: PathBuf,
+    /// Build only these bodies (by their names in the recipe), keeping the
+    /// others already in the kit; all of them when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bodies: Option<Vec<String>>,
+}
+
+/// What [`Rigger::build_kit`] made.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct KitReport {
+    /// The kit's `kit.json`.
+    pub kit: PathBuf,
+    /// How long the build took, in seconds.
+    pub seconds: f32,
+    pub bodies: Vec<KitBody>,
+}
+
+/// One body of a built kit.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct KitBody {
+    pub name: String,
+    /// Triangles in the body with its eyes, brows and teeth.
+    pub triangles: usize,
+    /// Morph targets baked in: two per slider, one per end.
+    pub morphs: usize,
+    /// Hair styles, outfits and the like, across every slot.
+    pub parts: usize,
+    /// How far the body was left from its base shape after every slider was
+    /// put back, in mm; above a fraction of a millimetre the morphs are off.
+    pub drift_mm: f32,
+}
+
 /// Rigs models like an existing character.
 pub trait Rigger: Send + Sync + fmt::Debug {
     /// Name and version for messages, e.g. "Blender 5.2.3".
@@ -306,6 +346,16 @@ pub trait Rigger: Send + Sync + fmt::Debug {
     fn match_colours(&self, request: &ColourRequest) -> Result<ColourReport, String> {
         let _ = request;
         Err(format!("{} cannot match colours", self.describe()))
+    }
+
+    /// Builds a character kit from a recipe: for each base body, one rigged
+    /// body with every slider baked in as a pair of morph targets, and the
+    /// hair, outfits and other parts that go on it, rigged to the same
+    /// skeleton with the same morphs, plus `kit.json`, which lists them for
+    /// a game. Blocks until done; a full kit takes minutes.
+    fn build_kit(&self, request: &KitRequest) -> Result<KitReport, String> {
+        let _ = request;
+        Err(format!("{} cannot build character kits", self.describe()))
     }
 }
 

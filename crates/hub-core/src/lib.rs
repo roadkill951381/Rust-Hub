@@ -28,7 +28,8 @@ pub mod session;
 
 pub use command::{Command, ObjectInfo, Outcome, SavedAsset, SizeAxis};
 pub use engine::{
-    Engines, FaceRequest, GenerateRequest, Generated, GenerationInfo, Generator, MeshOp, MeshTools,
+    Engines, FaceRequest, GenerateRequest, Generated, GenerationInfo, Generator, KitBody,
+    KitReport, KitRequest, MeshOp, MeshTools,
 };
 pub use error::{Error, Result};
 pub use mesh::{Aabb, Mesh};

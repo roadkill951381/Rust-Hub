@@ -5,7 +5,7 @@ use std::path::Path;
 
 use hub_blender::Blender;
 use hub_core::analysis::topology;
-use hub_core::engine::{ColourRequest, MeshOp, MeshTools, RigRequest, Rigger};
+use hub_core::engine::{ColourRequest, KitRequest, MeshOp, MeshTools, RigRequest, Rigger};
 use hub_core::primitives;
 use serde_json::Value;
 
@@ -366,4 +366,69 @@ fn colours_are_brought_to_the_game_characters_levels() {
             .all(|i| i["mimeType"] == "image/jpeg"),
         "{images}"
     );
+}
+
+#[test]
+fn character_kit_from_a_stand_in_human() {
+    let Some(blender) = blender() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let recipe = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_kit.json");
+    let report = blender
+        .build_kit(&KitRequest {
+            recipe: recipe.clone(),
+            output: dir.path().to_owned(),
+            bodies: None,
+        })
+        .unwrap();
+    let names: Vec<&str> = report.bodies.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["female", "male"]);
+    // weight, nose and (female only) neck, two ends each.
+    assert_eq!(report.bodies[0].morphs, 6);
+    assert_eq!(report.bodies[1].morphs, 4);
+    assert_eq!(report.bodies[0].parts, 3);
+    assert!(
+        report.bodies.iter().all(|b| b.drift_mm < 0.01),
+        "{report:?}"
+    );
+
+    let kit: Value = serde_json::from_str(&std::fs::read_to_string(&report.kit).unwrap()).unwrap();
+    let female = &kit["bodies"]["female"];
+    assert_eq!(female["sliders"]["weight"]["base"], 0.5);
+    assert_eq!(female["sliders"]["nose"]["pos"], "nose+");
+    assert_eq!(female["parts"]["outfit"][0]["hides"], 1);
+    assert_eq!(female["parts"]["hair"][0]["tint"], "hair");
+    assert_eq!(female["skins"][1]["file"], "female/skins/b.jpg");
+    assert!(dir.path().join("female/skins/b.jpg").is_file());
+    // The neck slider lifts the head bone, in glTF axes (Y up).
+    let lift = &female["bone_moves"]["tall+"]["mixamorig:Head"];
+    assert!((lift[1].as_f64().unwrap() - 0.1).abs() < 1e-3, "{lift}");
+
+    // The body file carries the morphs by name and the hidden-by-parts mask.
+    let gltf = glb_json(&dir.path().join("female/body.glb"));
+    let body = gltf["meshes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "female.body")
+        .unwrap();
+    assert_eq!(body["extras"]["targetNames"][1], "weight+");
+    let prim = &body["primitives"][0];
+    assert_eq!(prim["targets"].as_array().unwrap().len(), 6);
+    assert!(prim["attributes"]["_HIDE"].is_number(), "{prim}");
+    assert!(prim["attributes"]["JOINTS_0"].is_number());
+    // The stand-in's helper cube is gone: only the 24x16 sphere's vertices.
+    let count =
+        |accessor: &Value| gltf["accessors"][accessor.as_u64().unwrap() as usize]["count"].clone();
+    assert!(count(&prim["attributes"]["POSITION"]).as_u64().unwrap() >= 24 * 15);
+
+    // Rebuilding one body keeps the other in kit.json.
+    blender
+        .build_kit(&KitRequest {
+            recipe,
+            output: dir.path().to_owned(),
+            bodies: Some(vec!["male".into()]),
+        })
+        .unwrap();
+    let kit: Value = serde_json::from_str(&std::fs::read_to_string(&report.kit).unwrap()).unwrap();
+    assert!(kit["bodies"]["female"].is_object() && kit["bodies"]["male"].is_object());
 }
