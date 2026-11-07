@@ -68,10 +68,11 @@ pub fn build(config: &Config) -> Engines {
 /// Routes generation between hub-gen and ComfyUI.
 ///
 /// - `model: "comfyui[:workflow]"`: the whole job in ComfyUI.
-/// - `image_model: "comfyui[:workflow]"` with a prompt, or a `face` to keep:
-///   ComfyUI makes the picture (FLUX with PuLID for a face, a turnaround
-///   sheet for `multiview`), then stops it (if the hub started it) or unloads
-///   its models, so hub-gen has the GPU and memory for the shape.
+/// - `image_model: "comfyui[:workflow]"` with a prompt, a `face` to keep, or a
+///   `pose` guide to draw over: ComfyUI makes the picture (FLUX with PuLID for
+///   a face, a turnaround sheet for `multiview`), then stops it (if the hub
+///   started it) or unloads its models, so hub-gen has the GPU and memory for
+///   the shape.
 /// - Anything else: hub-gen.
 #[derive(Debug)]
 pub struct Generators {
@@ -155,13 +156,15 @@ enum Picture<'a> {
 }
 
 /// A named workflow wins; otherwise a face picks `PuLID` and `multiview` a
-/// turnaround sheet.
+/// turnaround sheet. A face or a pose guide always goes to ComfyUI: hub-gen's
+/// picture models can't keep a face, and they ignore a pose guide, drawing
+/// their own figure and views in any order.
 fn picture_workflow(request: &GenerateRequest) -> Picture<'_> {
     if request.image.is_some() {
         return Picture::HubGen;
     }
     let named = request.image_model.as_deref().and_then(parse_engine);
-    if named.is_none() && request.face.is_none() {
+    if named.is_none() && request.face.is_none() && request.pose.is_none() {
         return Picture::HubGen;
     }
     let chosen = match (request.face.is_some(), request.multiview) {
@@ -217,6 +220,16 @@ mod tests {
             picture_workflow(&request(Some("comfyui:mine"), true, true)),
             Picture::Comfy(Some("mine"))
         );
+        // A pose guide (rigging like a character, without a face) needs
+        // ComfyUI too, even when a hub-gen picture model is configured.
+        let mut posed = request(Some("hunyuan-dit"), false, true);
+        posed.pose = Some("pose.png".into());
+        assert_eq!(
+            picture_workflow(&posed),
+            Picture::Comfy(Some(hub_comfy::FLUX_DEV_SHEET))
+        );
+        posed.multiview = false;
+        assert_eq!(picture_workflow(&posed), Picture::Comfy(None));
         let mut given = request(Some("comfyui"), true, true);
         given.image = Some("picture.png".into());
         assert_eq!(picture_workflow(&given), Picture::HubGen);
