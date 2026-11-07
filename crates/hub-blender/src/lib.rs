@@ -12,7 +12,8 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use hub_core::engine::{
-    ColourReport, ColourRequest, MeshOp, MeshTools, RigReport, RigRequest, Rigger,
+    ColourReport, ColourRequest, KitReport, KitRequest, MeshOp, MeshTools, RigReport, RigRequest,
+    Rigger,
 };
 use hub_core::scene::{Material, Object, ObjectId, Transform};
 use hub_core::{Mesh, io};
@@ -20,6 +21,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 const SCRIPT: &str = include_str!("hub_jobs.py");
+/// Character kits: run with the person's Blender preferences, where MPFB lives.
+const KIT_SCRIPT: &str = include_str!("character_kit.py");
 
 /// Oldest Blender release the jobs are tested against.
 pub const MIN_VERSION: (u32, u32) = (4, 2);
@@ -117,7 +120,7 @@ impl Blender {
         script: &Path,
         args: impl IntoIterator<Item = &'a OsStr>,
     ) -> Result<String, String> {
-        let output = self.script_command(script, args)?;
+        let output = self.script_command(script, args, true)?;
         if output.status.success() {
             return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
         }
@@ -131,20 +134,21 @@ impl Blender {
         ))
     }
 
+    /// `factory` starts Blender with factory settings, so the person's
+    /// add-ons and preferences can't change a job; kits need them (MPFB).
     fn script_command<'a>(
         &self,
         script: &Path,
         args: impl IntoIterator<Item = &'a OsStr>,
+        factory: bool,
     ) -> Result<std::process::Output, String> {
         let mut command = Command::new(&self.program);
         if !self.python_module {
-            command.args([
-                "--background",
-                "--factory-startup",
-                "--python-exit-code",
-                "3",
-                "--python",
-            ]);
+            command.arg("--background");
+            if factory {
+                command.arg("--factory-startup");
+            }
+            command.args(["--python-exit-code", "3", "--python"]);
         }
         command.arg(script).arg("--").args(args);
         if let Some(dir) = script.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -199,9 +203,13 @@ impl Blender {
         write(&job, spec.to_string().as_bytes())?;
 
         tracing::debug!(program = %self.program.display(), op, "running Blender job");
-        let output = self.script_command(&script, [job.as_os_str()])?;
+        let output = self.script_command(&script, [job.as_os_str()], true)?;
+        Self::read_report(&report, &output)
+    }
 
-        let text = std::fs::read_to_string(&report).map_err(|_| {
+    /// Reads the report a job wrote, or says why there is none.
+    fn read_report(report: &Path, output: &std::process::Output) -> Result<Report, String> {
+        let text = std::fs::read_to_string(report).map_err(|_| {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let tail: Vec<&str> = stderr.lines().rev().take(8).collect();
             format!(
@@ -385,6 +393,34 @@ impl Rigger for Blender {
         serde_json::from_value(serde_json::Value::Object(report.rest))
             .map_err(|e| format!("unreadable colour report from Blender: {e}"))
     }
+
+    fn build_kit(&self, request: &KitRequest) -> Result<KitReport, String> {
+        let absolute = |p: &Path| {
+            std::path::absolute(p).map_err(|e| format!("could not resolve {}: {e}", p.display()))
+        };
+        let output = absolute(&request.output)?;
+        std::fs::create_dir_all(&output)
+            .map_err(|e| format!("could not create {}: {e}", output.display()))?;
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let script = dir.path().join("character_kit.py");
+        let job = dir.path().join("job.json");
+        let report = dir.path().join("report.json");
+        std::fs::write(&script, KIT_SCRIPT)
+            .map_err(|e| format!("could not write {}: {e}", script.display()))?;
+        let spec = json!({
+            "op": "character_kit",
+            "output": output,
+            "report": report,
+            "params": {"recipe": absolute(&request.recipe)?, "bodies": request.bodies},
+        });
+        std::fs::write(&job, spec.to_string())
+            .map_err(|e| format!("could not write {}: {e}", job.display()))?;
+        tracing::debug!(program = %self.program.display(), "building a character kit");
+        let out = self.script_command(&script, [job.as_os_str()], false)?;
+        let parsed = Self::read_report(&report, &out)?;
+        serde_json::from_value(serde_json::Value::Object(parsed.rest))
+            .map_err(|e| format!("unreadable kit report from Blender: {e}"))
+    }
 }
 
 /// A [`Blender`] found on first use, so front ends can start instantly and a
@@ -444,6 +480,10 @@ impl Rigger for LazyBlender {
 
     fn match_colours(&self, request: &ColourRequest) -> Result<ColourReport, String> {
         self.get()?.match_colours(request)
+    }
+
+    fn build_kit(&self, request: &KitRequest) -> Result<KitReport, String> {
+        self.get()?.build_kit(request)
     }
 }
 

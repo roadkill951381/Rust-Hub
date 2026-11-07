@@ -192,6 +192,33 @@ their brightness, the skin from 0.6 to 1.4). `--max-texture 1024` shrinks the
 texture to the game's size and `--jpeg` writes it as a JPEG, several times
 smaller. Run it last, after `sharpen-face`.
 
+### Build a character kit for an in-game customizer
+
+A kit lets a game's players make their own character: pick a body, move
+sliders for the body and face, and swap hair, outfits and shoes.
+`hub kit humans.json -o kit/` (File > Build character kit in the app,
+`build_character_kit` over MCP) builds one from a kit recipe in desktop
+Blender with MPFB and MakeHuman's CC0 assets. For each base body it writes:
+
+- `<body>/body.glb`: the body with its eyes, brows and teeth on the 52-bone
+  Mixamo skeleton, every slider baked in as two morph targets (`weight-`,
+  `weight+`), and a `_HIDE` vertex attribute that says which parts cover
+  which skin, so a game can hide it and nothing pokes through;
+- `<body>/<slot>/<part>.glb`: each hair style, outfit, pair of shoes or hat,
+  rigged to the same skeleton and carrying the same morphs, so a slider moves
+  the clothes with the body (hair textures are grey, for the game to tint);
+- `<body>/skins/<skin>.jpg`: the other skin tones;
+- `kit.json`: the sliders (with each body's starting value and range), the
+  bone moves each morph needs so joints follow the shape, the parts and the
+  colours, for cgen's `character-kit.js` to read.
+
+Every slider is baked the way MPFB's own panel would make the change: the
+macro (weight, muscle) or the shape targets are set to the slider's end, the
+clothes and skeleton are refitted, and where every vertex and bone went is
+recorded. `--body female` rebuilds one body and keeps the rest of the kit.
+The recipe format is at the top of `crates/hub-blender/src/character_kit.py`;
+cgen's `recipes/kits/humans.json` is the kit Brian's games use.
+
 ### Keep everything up to date
 
 Help > Check for updates in the app (or `hub updates`, or the MCP tool

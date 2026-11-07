@@ -273,6 +273,21 @@ pub enum Command {
         #[serde(default)]
         jpeg: bool,
     },
+    /// Build a character kit for an in-game character customizer from a kit
+    /// recipe: for each base body (such as male and female) a rigged body
+    /// with every slider (weight, muscle, jaw, nose...) baked in as morph
+    /// targets, and the hair, outfits and other parts that go on it, rigged
+    /// to the same skeleton and following the same sliders. Writes
+    /// `kit.json` and the GLBs into `output`, and adds the bodies to the
+    /// scene to look at. Needs Blender with the MPFB extension.
+    BuildCharacterKit {
+        recipe: PathBuf,
+        /// The kit folder.
+        output: PathBuf,
+        /// Build only these bodies, keeping the rest of an existing kit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bodies: Option<Vec<String>>,
+    },
     /// Save objects as a new version of a library asset.
     SaveAsset {
         name: String,
@@ -342,6 +357,7 @@ impl Command {
                 | Command::Rig { .. }
                 | Command::SharpenFace { .. }
                 | Command::MatchColours { .. }
+                | Command::BuildCharacterKit { .. }
         )
     }
 
@@ -368,6 +384,7 @@ impl Command {
             Command::Rig { .. } => "Rig",
             Command::SharpenFace { .. } => "Sharpen face",
             Command::MatchColours { .. } => "Match colours",
+            Command::BuildCharacterKit { .. } => "Build character kit",
             Command::SaveAsset { .. } => "Save asset",
             Command::LoadAsset { .. } => "Load asset",
             Command::ListAssets { .. } => "List assets",

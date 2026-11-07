@@ -175,6 +175,19 @@ enum Cmd {
         #[arg(long)]
         jpeg: bool,
     },
+    /// Build a character kit for an in-game customizer from a kit RECIPE:
+    /// rigged bodies with their sliders baked in as morph targets, the hair
+    /// and outfits that go on them, and kit.json. Needs Blender with MPFB.
+    Kit {
+        /// The kit recipe (.json).
+        recipe: PathBuf,
+        /// The folder to write the kit to.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Build only this body (repeat for more), keeping the rest of the kit.
+        #[arg(long = "body")]
+        bodies: Vec<String>,
+    },
     /// List the asset library, optionally only names containing QUERY.
     Assets { query: Option<String> },
     /// Render a model to a PNG with the viewport renderer.
@@ -434,6 +447,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     strength,
                     max_texture,
                     jpeg,
+                },
+            )?,
+        ),
+        Cmd::Kit {
+            recipe,
+            output,
+            bodies,
+        } => print(
+            json,
+            &run_with_progress(
+                &mut session,
+                Command::BuildCharacterKit {
+                    recipe,
+                    output,
+                    bodies: (!bodies.is_empty()).then_some(bodies),
                 },
             )?,
         ),

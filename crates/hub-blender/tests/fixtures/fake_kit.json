@@ -1,0 +1,23 @@
+{
+  "name": "fake-humans",
+  "source": "fake",
+  "texture_max": 256,
+  "skin_texture_max": 256,
+  "slots": {
+    "hair": {"label": "Hair", "kind": "hair", "optional": true, "tint": "hair"},
+    "outfit": {"label": "Outfit", "kind": "clothes"}
+  },
+  "attachment_tints": {"eyebrows": "hair"},
+  "colours": {"hair_level": 0.55, "hair": [{"id": "black", "label": "Black", "hex": "#1b1714"}, {"id": "blonde", "label": "Blonde", "hex": "#c9a46a"}]},
+  "sliders": [
+    {"id": "weight", "group": "Body", "label": "Weight", "macro": "weight", "range": [0, 1]},
+    {"id": "nose", "group": "Face", "label": "Nose", "neg": ["nose-in"], "pos": ["nose-out"]},
+    {"id": "tall", "group": "Body", "label": "Neck", "macro": "height", "range": [0, 1], "bodies": ["female"]}
+  ],
+  "bodies": {
+    "female": {"phenotype": {"weight": 0.5, "height": 0.5}, "skin": "a", "skins": ["a", "b"],
+               "parts": {"hair": ["bob", "long"], "outfit": ["coat"]},
+               "defaults": {"hair": "bob", "outfit": "coat"}},
+    "male": {"phenotype": {"weight": 0.4}, "parts": {"hair": ["short"], "outfit": ["coat"]}, "defaults": {"hair": "short"}}
+  }
+}

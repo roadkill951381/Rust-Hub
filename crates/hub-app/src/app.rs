@@ -307,6 +307,28 @@ impl HubApp {
         }
     }
 
+    /// Picks a kit recipe and a folder, then builds the kit in Blender.
+    fn kit_dialog(&mut self) {
+        let Some(recipe) = rfd::FileDialog::new()
+            .set_title("Kit recipe")
+            .add_filter("Kit recipe", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let mut folder = rfd::FileDialog::new().set_title("Folder to write the kit to");
+        if let Some(dir) = recipe.parent() {
+            folder = folder.set_directory(dir);
+        }
+        if let Some(output) = folder.pick_folder() {
+            self.execute(Command::BuildCharacterKit {
+                recipe,
+                output,
+                bodies: None,
+            });
+        }
+    }
+
     fn selection(&self) -> Option<Vec<ObjectId>> {
         self.selected.map(|id| vec![id])
     }
@@ -360,6 +382,10 @@ impl HubApp {
                     .clicked()
                 {
                     self.export_dialog(true);
+                }
+                ui.separator();
+                if ui.button("Build character kit…").clicked() {
+                    self.kit_dialog();
                 }
                 ui.separator();
                 if ui.button("Quit").clicked() {
