@@ -181,12 +181,13 @@ fn a_generated_model_is_rigged_like_the_reference() {
     assert_eq!((size(16), size(20)), (1536, 768));
 
     // A sharper face: the head close up, a "redrawn" picture with a blue
-    // patch in the middle of the face, painted back onto the texture.
+    // patch in the middle of the face, painted back onto the texture. The
+    // fixture's lock of hair hangs down the middle, so look beside it.
     let view = dir.path().join("face-view.png");
     blender.face_view(&output, &view).unwrap();
     let mut picture = image::open(&view).unwrap().to_rgb8();
     assert_eq!(picture.dimensions(), (1024, 1024));
-    let skin = *picture.get_pixel(512, 560);
+    let skin = *picture.get_pixel(470, 560);
     assert!(
         skin[0] > skin[2] + 40,
         "the middle of the face is skin: {skin:?}"
@@ -209,12 +210,12 @@ fn a_generated_model_is_rigged_like_the_reference() {
     let again = dir.path().join("face-again.png");
     blender.face_view(&painted, &again).unwrap();
     let again = image::open(&again).unwrap().to_rgb8();
-    let patch = *again.get_pixel(512, 460);
+    let patch = *again.get_pixel(470, 460);
     assert!(
         patch[2] > patch[0] + 80,
         "the patch is on the face now: {patch:?}"
     );
-    let below = *again.get_pixel(512, 600);
+    let below = *again.get_pixel(470, 600);
     assert!(
         below[0] > below[2] + 40,
         "the rest of the face is still skin: {below:?}"

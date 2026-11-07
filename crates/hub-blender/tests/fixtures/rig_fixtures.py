@@ -147,6 +147,17 @@ bpy.ops.export_scene.gltf(
 bpy.ops.wm.read_factory_settings(use_empty=True)
 bones = {**BONES, **arm_bones(model_angle)}
 me = capsule_body(bones, scale=1.15)
+# A dark lock of hair hanging down the middle of the face, in front of it, as
+# generated characters often have: skin detection must not take its colour.
+strand = bmesh.new()
+strand.from_mesh(me)
+bmesh.ops.create_cube(
+    strand,
+    size=1.0,
+    matrix=Matrix.Translation((0.0, -0.132, 1.65)) @ Matrix.Diagonal((0.024, 0.01, 0.3, 1.0)),
+)
+strand.to_mesh(me)
+strand.free()
 obj = bpy.data.objects.new("generated", me)
 bpy.context.scene.collection.objects.link(obj)
 img = bpy.data.images.new("tex", 256, 256)
@@ -169,7 +180,9 @@ for poly in me.polygons:
     xs = sum(me.vertices[v].co.x for v in poly.vertices) / len(poly.vertices)
     for li, v in zip(poly.loop_indices, poly.vertices, strict=True):
         co = me.vertices[v].co
-        if z > 1.5:
+        if min(me.vertices[w].co.y for w in poly.vertices) < -0.125:
+            uv.data[li].uv = (0.75, 0.5)  # the lock of hair
+        elif z > 1.5:
             # The head gets its own texels, the front and back side by side,
             # so a face can be painted onto it.
             u = (0.0 if poly.normal.y < 0 else 0.25) + 0.02 + 0.21 * clip((co.x + 0.15) / 0.3)

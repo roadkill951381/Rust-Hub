@@ -998,12 +998,21 @@ def skin_faces(obj, arm):
     mw = arm.matrix_world
     top = mw @ head.tail_local
     base = mw @ head.head_local
-    aim = base.lerp(top, 0.35)
+    # The face's colour: the median over a grid of rays at the front of the
+    # head, so a strand of hair, an eye or the lips crossing one ray doesn't
+    # decide the skin tone.
     toward = Vector((0.0, 1.0, 0.0))
-    hit, _loc, _normal, index = obj.ray_cast(aim - 2.0 * toward, toward)
-    if not hit:
+    side = Vector((1.0, 0.0, 0.0)) * (top - base).length
+    seen = []
+    for up in (0.2, 0.3, 0.4, 0.5):
+        for across in (-0.25, -0.12, 0.0, 0.12, 0.25):
+            start = base.lerp(top, up) + side * across - 2.0 * toward
+            hit, _loc, normal, index = obj.ray_cast(start, toward)
+            if hit and normal.y < -0.3:
+                seen.append(colours[index])
+    if not seen:
         return np.zeros(n, dtype=bool), "could not find the face to sample skin colour"
-    tone = colours[index]
+    tone = np.median(np.array(seen), axis=0)
 
     def chroma(c):
         total = c.sum(axis=-1, keepdims=True) + 1e-6
@@ -1013,7 +1022,7 @@ def skin_faces(obj, arm):
     got, level = chroma(colours)
     close = np.linalg.norm(got - want, axis=1) < 0.035
     lit = (level > bright * 0.55) & (level < bright * 1.6)
-    skin = close & lit
+    skin = raw = close & lit
     # Smooth out speckles: a face follows the majority of its neighbours.
     edges = {}
     for poly in obj.data.polygons:
@@ -1026,6 +1035,9 @@ def skin_faces(obj, arm):
     for _ in range(2):
         votes = np.array([skin[nb].mean() if nb else skin[i] for i, nb in enumerate(neighbours)])
         skin = np.where(votes > 0.5, True, np.where(votes < 0.5, False, skin))
+    if not skin.any() and raw.any():
+        # Skin only in small patches (a low-poly face): keep them all.
+        skin = raw
     return skin, None
 
 
