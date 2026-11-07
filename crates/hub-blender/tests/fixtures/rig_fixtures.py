@@ -1,12 +1,13 @@
 """Builds a rigged reference character and an unrigged 'generated' model,
 for the rigging test in `blender_jobs.rs`.
 
-blender -b --python rig_fixtures.py -- OUTDIR [arm_deg_ref] [arm_deg_model] [turn]
+blender -b --python rig_fixtures.py -- OUTDIR [arm_deg_ref] [arm_deg_model] [turn] [beard]
 
 The reference is a capsule figure on a mixamorig-named skeleton in an A-pose,
 with a short idle action. The model is fatter, holds its arms at another
 angle, is textured skin on the head and hands and dark elsewhere, and can face
-the other way, like a generated character.
+the other way, like a generated character. With ``beard``, its skin is dark
+brown, its clothes dark grey, and a darker beard covers the lower face.
 """
 
 import math
@@ -24,6 +25,7 @@ out = args[0]
 ref_angle = float(args[1]) if len(args) > 1 else 47.0
 model_angle = float(args[2]) if len(args) > 2 else 32.0
 turn = len(args) > 3 and args[3] == "turn"
+beard = len(args) > 4 and args[4] == "beard"
 
 BONES = {
     # name: (head, tail, parent)
@@ -161,10 +163,18 @@ strand.free()
 obj = bpy.data.objects.new("generated", me)
 bpy.context.scene.collection.objects.link(obj)
 img = bpy.data.images.new("tex", 256, 256)
+SKIN = (0.35, 0.26, 0.22) if beard else (0.80, 0.60, 0.50)
+CLOTHES = (0.25, 0.245, 0.245) if beard else (0.12, 0.12, 0.14)
+BEARD = (0.16, 0.11, 0.09)
 px = []
-for _y in range(256):
+for y in range(256):
     for x in range(256):
-        px += [0.80, 0.60, 0.50, 1.0] if x < 128 else [0.12, 0.12, 0.14, 1.0]
+        # The beard: the front of the head (u up to 0.23), chin to nose
+        # (v 0.23 to 0.44; see the UVs below).
+        if beard and x < 60 and 60 <= y <= 112:
+            px += [*BEARD, 1.0]
+        else:
+            px += [*SKIN, 1.0] if x < 128 else [*CLOTHES, 1.0]
 img.pixels = px
 img.pack()
 obj.data.materials.append(material("generated", image=img))

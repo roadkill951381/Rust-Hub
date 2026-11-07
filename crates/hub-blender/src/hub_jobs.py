@@ -979,6 +979,26 @@ def face_colours(obj, image):
     return image[y, x, :3]
 
 
+def face_tone(seen):
+    """The skin tone among colours seen on the front of the head (0..1 RGB,
+    one row each). A beard, a moustache, eyebrows or hair can cover most of
+    the face, and they are darker than its skin, so: keep the colours in the
+    usual range of human skin (Cr 133-173 and Cb 77-127 in YCbCr; zombies'
+    grey-green skin falls outside it, and then every colour counts), and of
+    those, the brightest quarter. Eye whites, teeth and shine fall outside
+    the range, so they don't count as the brightest."""
+    import numpy as np
+
+    rgb = seen * 255.0
+    cr = 128 + 0.439 * rgb[:, 0] - 0.368 * rgb[:, 1] - 0.071 * rgb[:, 2]
+    cb = 128 - 0.148 * rgb[:, 0] - 0.291 * rgb[:, 1] + 0.439 * rgb[:, 2]
+    human = (cr >= 133) & (cr <= 173) & (cb >= 77) & (cb <= 127)
+    if human.sum() >= 3:
+        seen = seen[human]
+    brightest = np.argsort(seen.sum(axis=1))[-max(3, len(seen) // 4) :]
+    return np.median(seen[brightest], axis=0)
+
+
 def skin_faces(obj, arm):
     """Which faces show skin: those coloured like the middle of the face.
     Returns (bool per face, a note when it could not tell)."""
@@ -998,13 +1018,12 @@ def skin_faces(obj, arm):
     mw = arm.matrix_world
     top = mw @ head.tail_local
     base = mw @ head.head_local
-    # The face's colour: the median over a grid of rays at the front of the
-    # head, so a strand of hair, an eye or the lips crossing one ray doesn't
-    # decide the skin tone.
+    # The face's colour, from a grid of rays at the front of the head, so a
+    # strand of hair, an eye or the lips crossing one ray doesn't decide it.
     toward = Vector((0.0, 1.0, 0.0))
     side = Vector((1.0, 0.0, 0.0)) * (top - base).length
     seen = []
-    for up in (0.2, 0.3, 0.4, 0.5):
+    for up in (0.2, 0.3, 0.4, 0.5, 0.6):
         for across in (-0.25, -0.12, 0.0, 0.12, 0.25):
             start = base.lerp(top, up) + side * across - 2.0 * toward
             hit, _loc, normal, index = obj.ray_cast(start, toward)
@@ -1012,7 +1031,7 @@ def skin_faces(obj, arm):
                 seen.append(colours[index])
     if not seen:
         return np.zeros(n, dtype=bool), "could not find the face to sample skin colour"
-    tone = np.median(np.array(seen), axis=0)
+    tone = face_tone(np.array(seen))
 
     def chroma(c):
         total = c.sum(axis=-1, keepdims=True) + 1e-6

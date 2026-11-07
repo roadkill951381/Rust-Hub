@@ -221,3 +221,43 @@ fn a_generated_model_is_rigged_like_the_reference() {
         "the rest of the face is still skin: {below:?}"
     );
 }
+
+#[test]
+fn dark_skin_under_a_beard_is_still_found() {
+    let Some(blender) = blender() else { return };
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rig_fixtures.py");
+    let skin = |beard: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        blender
+            .run_script(
+                &fixtures,
+                [
+                    dir.path().as_os_str(),
+                    "47".as_ref(),
+                    "32".as_ref(),
+                    "face".as_ref(),
+                    beard.as_ref(),
+                ],
+            )
+            .unwrap();
+        blender
+            .rig(&RigRequest {
+                model: dir.path().join("model.glb"),
+                reference: dir.path().join("reference.glb"),
+                output: dir.path().join("rigged.glb"),
+                triangles: None,
+                materials: Some("surv_test".into()),
+            })
+            .unwrap()
+            .skin_fraction
+    };
+    // Dark brown skin, dark grey clothes and a beard over the lower face,
+    // like a generated Marcus: about as much skin as the plain model, not
+    // none (the beard's tone) and not the clothes too.
+    let (plain, bearded) = (skin("plain"), skin("beard"));
+    eprintln!("skin: plain {plain}, bearded {bearded}");
+    assert!(
+        (plain * 0.6..plain * 1.2).contains(&bearded),
+        "plain {plain}, bearded {bearded}"
+    );
+}
