@@ -34,6 +34,10 @@ class Settings:
     image_model: str = "hunyuan-dit"
     #: Texture model for ``texture: true``.
     texture_model: str = "hunyuan3d-paint"
+    #: Run Hunyuan3D-Paint's light-and-shadow remover on the pictures before
+    #: painting. It suits photos; on evenly lit generated pictures it mostly
+    #: pales dark clothes, so it can be turned off.
+    delight: bool = True
     device: str = "cuda"
     #: Keep only the model in use on the GPU, parking the others in system
     #: memory. Needed on 16 GB cards when texturing; costs a few seconds.
@@ -61,6 +65,7 @@ class Settings:
         s.texture_model = env("HUB_GEN_TEXTURE_MODEL", s.texture_model)
         s.device = env("HUB_GEN_DEVICE", s.device)
         s.low_vram = env("HUB_GEN_LOW_VRAM", "1").lower() not in ("0", "false", "no")
+        s.delight = env("HUB_GEN_DELIGHT", "1").lower() not in ("0", "false", "no")
         s.keep_jobs = int(env("HUB_GEN_KEEP_JOBS", str(s.keep_jobs)))
         s.idle_unload = float(env("HUB_GEN_IDLE_UNLOAD", str(s.idle_unload)))
         if d := env("HUB_GEN_TRIPOSG_DIR"):

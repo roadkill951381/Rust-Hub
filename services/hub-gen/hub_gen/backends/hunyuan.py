@@ -98,6 +98,8 @@ class HunyuanPaint:
             self.pipe = Hunyuan3DPaintPipeline.from_pretrained(repo, subfolder=subfolder)
         if settings.low_vram:
             self.pipe.enable_model_cpu_offload()
+        if not settings.delight:
+            self.pipe.models["delight_model"] = flat_on_white
 
     def paint(
         self, mesh: trimesh.Trimesh, image: Image.Image | list[Image.Image], *, report: Report
@@ -112,3 +114,22 @@ class HunyuanPaint:
         textured = self.pipe(mesh, image=image)
         report(1.0, "painted")
         return textured
+
+
+def flat_on_white(image: Image.Image) -> Image.Image:
+    """What Paint's light remover hands the multiview model, minus the
+    diffusion pass that removes light: the picture at 512 px, its edge eroded
+    by a pixel and laid on white."""
+    import numpy as np
+
+    image = image.resize((512, 512))
+    if image.mode != "RGBA":
+        return image.convert("RGB")
+    rgba = np.asarray(image, dtype=np.float64) / 255
+    padded = np.pad(rgba[..., 3], 1, mode="edge")
+    h, w = rgba.shape[:2]
+    alpha = np.min(
+        [padded[dy : dy + h, dx : dx + w] for dy in range(3) for dx in range(3)], axis=0
+    )[..., None]
+    rgb = rgba[..., :3] * alpha + (1.0 - alpha)
+    return Image.fromarray((rgb * 255).round().astype(np.uint8), "RGB")

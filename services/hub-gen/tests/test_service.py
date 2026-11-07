@@ -310,3 +310,19 @@ def test_painted_textures_take_the_pictures_colours():
 
     plain = trimesh.creation.box()
     assert match_colours(plain, [Image.fromarray(picture, "RGBA")]) is plain
+
+
+def test_without_the_light_remover_paint_sees_the_picture_on_white(monkeypatch):
+    from hub_gen.backends.hunyuan import flat_on_white
+
+    monkeypatch.setenv("HUB_GEN_DELIGHT", "0")
+    assert not Settings.from_env().delight
+    picture = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
+    ImageDraw.Draw(picture).rectangle((256, 256, 767, 767), fill=(20, 24, 60, 255))
+    flat = np.asarray(flat_on_white(picture), dtype=int)
+    assert flat.shape == (512, 512, 3)
+    # Dark navy stays dark navy on white, and a soft edge is eroded away.
+    assert (flat[256, 256] == (20, 24, 60)).all()
+    assert (flat[130, 256] == (20, 24, 60)).all()
+    assert (flat[10, 10] == 255).all()
+    assert (flat[127, 256] == 255).all()
