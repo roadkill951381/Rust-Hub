@@ -993,6 +993,9 @@ impl HubServer {
     }
 }
 
+// `tool_handler` generates `async fn call_tool` without an `.await`. The lint is new in clippy 1.99,
+// so older toolchains would call its name unknown.
+#[allow(unknown_lints, clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for HubServer {
     fn get_info(&self) -> ServerConfig {
