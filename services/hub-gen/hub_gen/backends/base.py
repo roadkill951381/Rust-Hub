@@ -21,25 +21,34 @@ log = logging.getLogger(__name__)
 Kind = Literal["shape", "image", "texture"]
 
 
+#: Views of one object, by name: "front", "left" (facing left), "back", "right".
+Views = dict[str, Image.Image]
+
+
 class ShapeModel(Protocol):
     def generate(
-        self, image: Image.Image, *, seed: int, steps: int | None, report: Report
+        self, image: Image.Image | Views, *, seed: int, steps: int | None, report: Report
     ) -> trimesh.Trimesh:
-        """Builds an untextured mesh (Y-up, centred) from an RGBA object image."""
+        """Builds an untextured mesh (Y-up, centred) from an RGBA object image,
+        or from several views when the model's spec says ``multiview``."""
         ...
 
 
 class ImageModel(Protocol):
-    def generate(self, prompt: str, *, seed: int, report: Report) -> Image.Image:
-        """Paints a reference picture of the prompt's object."""
+    def generate(
+        self, prompt: str, *, seed: int, report: Report, sheet: bool = False
+    ) -> Image.Image:
+        """Paints a reference picture of the prompt's object; with ``sheet``, a
+        turnaround sheet of it (front, side facing left, back)."""
         ...
 
 
 class TextureModel(Protocol):
     def paint(
-        self, mesh: trimesh.Trimesh, image: Image.Image, *, report: Report
+        self, mesh: trimesh.Trimesh, image: Image.Image | list[Image.Image], *, report: Report
     ) -> trimesh.Trimesh:
-        """Returns the mesh with UVs and a colour texture matching the image."""
+        """Returns the mesh with UVs and a colour texture matching the image,
+        or the views (front first)."""
         ...
 
 
@@ -62,6 +71,8 @@ class ModelSpec:
     licence: str
     note: str
     options: dict[str, Any] = field(default_factory=dict)
+    #: Builds shapes from several views of the object.
+    multiview: bool = False
 
 
 MODELS: dict[str, ModelSpec] = {
@@ -97,6 +108,22 @@ MODELS: dict[str, ModelSpec] = {
                 "use_safetensors": False,
                 "flashvdm_topk": "merge",
             },
+        ),
+        ModelSpec(
+            "hunyuan3d-2mv",
+            "shape",
+            "hub_gen.backends.hunyuan:HunyuanShape",
+            ("torch", "hy3dgen"),
+            6.0,
+            "Tencent Hunyuan 3D 2.0 Community (not EU, UK or South Korea)",
+            "Hunyuan3D-DiT v2 multiview Turbo: shape from front, side and back views.",
+            {
+                "repo": "tencent/Hunyuan3D-2mv",
+                "subfolder": "hunyuan3d-dit-v2-mv-turbo",
+                "steps": 5,
+                "use_safetensors": True,
+            },
+            multiview=True,
         ),
         ModelSpec(
             "triposg",
@@ -146,6 +173,16 @@ MODELS: dict[str, ModelSpec] = {
             0.0,
             "MIT",
             "Not AI: a procedural stand-in for testing the pipeline without a GPU.",
+        ),
+        ModelSpec(
+            "demo-mv",
+            "shape",
+            "hub_gen.backends.demo:DemoShape",
+            (),
+            0.0,
+            "MIT",
+            "Not AI: the demo lathe, taking views like a multiview model.",
+            multiview=True,
         ),
         ModelSpec(
             "demo-image",
@@ -237,6 +274,7 @@ class Models:
             {
                 "name": s.name,
                 "kind": s.kind,
+                "multiview": s.multiview,
                 "available": not missing_modules(s),
                 "loaded": s.name in self._loaded,
                 "vram_gb": s.vram_gb,

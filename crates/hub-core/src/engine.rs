@@ -5,14 +5,17 @@
 //!   with Blender in the background.
 //! - [`Generator`] makes models from a prompt or image, implemented by
 //!   `hub-gen` against the local generation service on the person's own GPU.
+//! - [`Rigger`] fits a new model to an existing rigged character, keeping
+//!   its skeleton and animations, implemented by `hub-blender`.
 //! - [`Library`](crate::library::Library) keeps saved models and their versions.
 //!
 //! Front ends build an [`Engines`] once and hand it to
 //! [`Session::with_engines`](crate::Session::with_engines). Commands that need a
 //! missing engine fail with a message that says how to set it up.
 
+use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use schemars::JsonSchema;
@@ -82,6 +85,23 @@ pub struct GenerateRequest {
     /// Target triangle count for the result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faces: Option<u32>,
+    /// A portrait whose face the picture keeps (PuLID in ComfyUI), for
+    /// making a character look like a person in a picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face: Option<PathBuf>,
+    /// Draw the subject from the front, side and back, and build the shape
+    /// from all three views (Hunyuan3D-2mv): truer backs and profiles.
+    #[serde(default)]
+    pub multiview: bool,
+    /// A plain grey figure (or turnaround sheet of one) whose pose and
+    /// framing the picture follows, rendered by [`Rigger::pose_views`] from
+    /// the character being rigged against. Only ComfyUI's pictures use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pose: Option<PathBuf>,
+    /// How much of the pose guide the picture repaints (0 to 1); the
+    /// picture engine's default when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repaint: Option<f32>,
 }
 
 /// Where a generated model came from, stored with it in the library.
@@ -100,6 +120,18 @@ pub struct GenerationInfo {
     /// The intermediate picture the shape was made from, when one was made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<PathBuf>,
+    /// The portrait whose face the picture kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face: Option<PathBuf>,
+    /// The shape was built from several views.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multiview: bool,
+    /// How the model was rigged, when it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rig: Option<RigReport>,
+    /// The sharp close-up of the face painted onto the texture, when one was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_close_up: Option<PathBuf>,
 }
 
 /// A finished generation: a GLB on disk plus how it was made.
@@ -123,6 +155,115 @@ pub trait Generator: Send + Sync + fmt::Debug {
         request: &GenerateRequest,
         progress: Progress<'_>,
     ) -> Result<Generated, String>;
+
+    /// Redraws a close-up of a model's face ([`Rigger::face_view`]) sharply,
+    /// with the likeness of a portrait, keeping it where it is in the frame.
+    /// Returns the new picture (PNG). Engines that can't say so.
+    fn redraw_face(
+        &self,
+        request: &FaceRequest,
+        progress: Progress<'_>,
+    ) -> Result<PathBuf, String> {
+        let _ = (request, progress);
+        Err(format!(
+            "{} cannot redraw faces; that needs ComfyUI with the PuLID add-on",
+            self.describe()
+        ))
+    }
+}
+
+/// What [`Generator::redraw_face`] draws over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceRequest {
+    /// The close-up render of the model's head.
+    pub render: PathBuf,
+    /// The portrait whose face to keep.
+    pub face: PathBuf,
+    /// Who it is, e.g. the prompt the character was made from.
+    pub prompt: String,
+    /// Random when omitted.
+    pub seed: Option<u64>,
+    /// How much of the render to repaint, 0 to 1: more is sharper and more
+    /// like the portrait, less stays truer to where the model's eyes and
+    /// mouth are.
+    pub repaint: f32,
+}
+
+/// Fit a new model to a rigged character. Works on files, because the scene
+/// holds meshes without skeletons.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RigRequest {
+    /// The new model (.glb), usually a textured one from generation.
+    pub model: PathBuf,
+    /// A rigged character (.glb) whose skeleton, rest pose and animations the
+    /// result keeps exactly, so a game's animations still play on it.
+    pub reference: PathBuf,
+    /// Where to write the rigged model (.glb).
+    pub output: PathBuf,
+    /// Reduce the model to about this many triangles first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triangles: Option<u32>,
+    /// Start of the material names: `surv_mei` makes `surv_mei.body` (skin)
+    /// and `surv_mei.clothes`. Defaults to the reference's own `<name>.body`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materials: Option<String>,
+}
+
+/// What [`Rigger::rig`] did.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RigReport {
+    pub triangles: usize,
+    /// Bones in the kept skeleton.
+    pub bones: usize,
+    /// Material names written, skin first.
+    pub materials: Vec<String>,
+    /// The model faced the other way and was turned round.
+    #[serde(default)]
+    pub turned: bool,
+    /// How far each arm sat from the reference's rest pose, in degrees, before
+    /// it was moved into it.
+    #[serde(default)]
+    pub arm_offsets_deg: BTreeMap<String, f32>,
+    /// Share of the surface given the skin material, 0 to 1.
+    #[serde(default)]
+    pub skin_fraction: f32,
+    /// Anything the person should know, e.g. why there is one material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Rigs models like an existing character.
+pub trait Rigger: Send + Sync + fmt::Debug {
+    /// Name and version for messages, e.g. "Blender 5.2.3".
+    fn describe(&self) -> String;
+
+    /// Writes `request.output`: the reference character with its meshes
+    /// swapped for the model, skinned to the same skeleton. Blocks until done.
+    fn rig(&self, request: &RigRequest) -> Result<RigReport, String>;
+
+    /// Renders `reference` in its rest pose on a light grey background into
+    /// `output` (PNG): one front view, or with `sheet` a turnaround of front,
+    /// side (facing left) and back. As a plain grey figure, or `textured`
+    /// with its own materials. Picture models use it as a pose guide, so a
+    /// new character stands like the rig.
+    fn pose_views(
+        &self,
+        reference: &Path,
+        sheet: bool,
+        textured: bool,
+        output: &Path,
+    ) -> Result<(), String>;
+
+    /// Renders the head of a rigged, textured model from the front, close up
+    /// and unlit, into `output` (a square PNG): the picture
+    /// [`Generator::redraw_face`] draws over.
+    fn face_view(&self, model: &Path, output: &Path) -> Result<(), String>;
+
+    /// Paints `picture`, a redrawing of [`Rigger::face_view`]'s render, onto
+    /// the front of the model's head through the same camera, and writes the
+    /// model with its new texture to `output`. Returns how many texels it
+    /// painted.
+    fn project_face(&self, model: &Path, picture: &Path, output: &Path) -> Result<usize, String>;
 }
 
 /// The engines available to a session. Cheap to clone.
@@ -130,5 +271,6 @@ pub trait Generator: Send + Sync + fmt::Debug {
 pub struct Engines {
     pub mesh_tools: Option<Arc<dyn MeshTools>>,
     pub generator: Option<Arc<dyn Generator>>,
+    pub rigger: Option<Arc<dyn Rigger>>,
     pub library: Option<Library>,
 }

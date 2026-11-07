@@ -6,12 +6,12 @@
 //! or its standard install folders. `HUB_BLENDER` may also point to a Python
 //! interpreter with Blender's `bpy` module installed, which CI uses.
 
-use std::ffi::OsString;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use hub_core::engine::{MeshOp, MeshTools};
+use hub_core::engine::{MeshOp, MeshTools, RigReport, RigRequest, Rigger};
 use hub_core::scene::{Material, Object, ObjectId, Transform};
 use hub_core::{Mesh, io};
 use serde::Deserialize;
@@ -37,6 +37,17 @@ struct Report {
     blender: String,
     #[serde(default)]
     error: Option<String>,
+    /// Everything else the job reported, e.g. a rig's details.
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
+}
+
+/// What a job reads.
+#[derive(Clone, Copy)]
+enum Input<'a> {
+    None,
+    Mesh(&'a Mesh),
+    File(&'a Path),
 }
 
 impl Blender {
@@ -72,7 +83,7 @@ impl Blender {
             version: String::new(),
         };
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let report = blender.run(dir.path(), "version", None, &json!({}))?;
+        let report = blender.run(dir.path(), "version", Input::None, None, &json!({}))?;
         let (major, minor) = parse_version(&report.blender);
         if (major, minor) < MIN_VERSION {
             return Err(format!(
@@ -97,25 +108,76 @@ impl Blender {
         Arc::new(self)
     }
 
-    /// Runs one job in `dir` and returns Blender's report.
+    /// Runs a Python script in Blender in the background; the script finds
+    /// `args` after `--` in `sys.argv`. Returns its standard output.
+    pub fn run_script<'a>(
+        &self,
+        script: &Path,
+        args: impl IntoIterator<Item = &'a OsStr>,
+    ) -> Result<String, String> {
+        let output = self.script_command(script, args)?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail: Vec<&str> = stderr.lines().rev().take(8).collect();
+        Err(format!(
+            "{} failed ({}): {}",
+            script.display(),
+            output.status,
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        ))
+    }
+
+    fn script_command<'a>(
+        &self,
+        script: &Path,
+        args: impl IntoIterator<Item = &'a OsStr>,
+    ) -> Result<std::process::Output, String> {
+        let mut command = Command::new(&self.program);
+        if !self.python_module {
+            command.args([
+                "--background",
+                "--factory-startup",
+                "--python-exit-code",
+                "3",
+                "--python",
+            ]);
+        }
+        command.arg(script).arg("--").args(args);
+        if let Some(dir) = script.parent().filter(|d| !d.as_os_str().is_empty()) {
+            command.current_dir(dir);
+        }
+        command
+            .output()
+            .map_err(|e| format!("could not start {}: {e}", self.program.display()))
+    }
+
+    /// Runs one job in `dir` and returns Blender's report. The output goes to
+    /// `output`, or `dir/output.glb`.
     fn run(
         &self,
         dir: &Path,
         op: &str,
-        input: Option<&Mesh>,
+        input: Input<'_>,
+        output: Option<&Path>,
         params: &serde_json::Value,
     ) -> Result<Report, String> {
         let script = dir.join("hub_jobs.py");
         let job = dir.join("job.json");
         let report = dir.join("report.json");
-        let input_path = dir.join("input.glb");
-        let output_path = dir.join("output.glb");
+        let mut input_path = dir.join("input.glb");
+        let output_path = output.map_or_else(|| dir.join("output.glb"), Path::to_owned);
         let write = |path: &Path, bytes: &[u8]| {
             std::fs::write(path, bytes)
                 .map_err(|e| format!("could not write {}: {e}", path.display()))
         };
         write(&script, SCRIPT.as_bytes())?;
-        if let Some(mesh) = input {
+        if let Input::File(path) = input {
+            input_path = std::path::absolute(path)
+                .map_err(|e| format!("could not resolve {}: {e}", path.display()))?;
+        }
+        if let Input::Mesh(mesh) = input {
             let object = Object {
                 id: ObjectId(0),
                 name: "input".into(),
@@ -134,26 +196,8 @@ impl Blender {
         });
         write(&job, spec.to_string().as_bytes())?;
 
-        let mut args: Vec<OsString> = Vec::new();
-        if !self.python_module {
-            args.extend(
-                [
-                    "--background",
-                    "--factory-startup",
-                    "--python-exit-code",
-                    "3",
-                    "--python",
-                ]
-                .map(OsString::from),
-            );
-        }
-        args.extend([script.into_os_string(), "--".into(), job.into_os_string()]);
         tracing::debug!(program = %self.program.display(), op, "running Blender job");
-        let output = Command::new(&self.program)
-            .args(&args)
-            .current_dir(dir)
-            .output()
-            .map_err(|e| format!("could not start {}: {e}", self.program.display()))?;
+        let output = self.script_command(&script, [job.as_os_str()])?;
 
         let text = std::fs::read_to_string(&report).map_err(|_| {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -180,7 +224,7 @@ impl Blender {
     /// Runs `op` on `mesh` and returns the resulting mesh, everything joined.
     fn process(&self, op: &str, mesh: &Mesh, params: &serde_json::Value) -> Result<Mesh, String> {
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        self.run(dir.path(), op, Some(mesh), params)?;
+        self.run(dir.path(), op, Input::Mesh(mesh), None, params)?;
         let objects = io::import(&dir.path().join("output.glb")).map_err(|e| e.to_string())?;
         let mut out = Mesh::default();
         for o in objects {
@@ -221,6 +265,105 @@ impl MeshTools for Blender {
     }
 }
 
+/// The side of the face close-up, in pixels: what FLUX draws at.
+const FACE_VIEW_SIZE: u32 = 1024;
+
+/// An absolute path for a file to write, with its folder made.
+fn absolute_dir(path: &Path) -> Result<std::path::PathBuf, String> {
+    let path = std::path::absolute(path)
+        .map_err(|e| format!("could not resolve {}: {e}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    Ok(path)
+}
+
+impl Rigger for Blender {
+    fn describe(&self) -> String {
+        format!("Blender {}", self.version)
+    }
+
+    fn rig(&self, request: &RigRequest) -> Result<RigReport, String> {
+        let absolute = |p: &Path| {
+            std::path::absolute(p).map_err(|e| format!("could not resolve {}: {e}", p.display()))
+        };
+        let output = absolute(&request.output)?;
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+        }
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let report = self.run(
+            dir.path(),
+            "rig",
+            Input::File(&request.model),
+            Some(&output),
+            &json!({
+                "reference": absolute(&request.reference)?,
+                "triangles": request.triangles,
+                "materials": request.materials,
+            }),
+        )?;
+        serde_json::from_value(serde_json::Value::Object(report.rest))
+            .map_err(|e| format!("unreadable rig report from Blender: {e}"))
+    }
+    fn pose_views(
+        &self,
+        reference: &Path,
+        sheet: bool,
+        textured: bool,
+        output: &Path,
+    ) -> Result<(), String> {
+        let output = std::path::absolute(output)
+            .map_err(|e| format!("could not resolve {}: {e}", output.display()))?;
+        // The sizes FLUX draws characters at; the picture workflow scales
+        // the guide to its own size anyway.
+        let (width, height) = if sheet { (1536, 768) } else { (832, 1216) };
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        self.run(
+            dir.path(),
+            "pose_views",
+            Input::File(reference),
+            Some(&output),
+            &json!({"sheet": sheet, "textured": textured, "width": width, "height": height}),
+        )?;
+        Ok(())
+    }
+
+    fn face_view(&self, model: &Path, output: &Path) -> Result<(), String> {
+        let output = absolute_dir(output)?;
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        self.run(
+            dir.path(),
+            "face_view",
+            Input::File(model),
+            Some(&output),
+            &json!({"size": FACE_VIEW_SIZE}),
+        )?;
+        Ok(())
+    }
+
+    fn project_face(&self, model: &Path, picture: &Path, output: &Path) -> Result<usize, String> {
+        let output = absolute_dir(output)?;
+        let picture = std::path::absolute(picture)
+            .map_err(|e| format!("could not resolve {}: {e}", picture.display()))?;
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let report = self.run(
+            dir.path(),
+            "project_face",
+            Input::File(model),
+            Some(&output),
+            &json!({"picture": picture}),
+        )?;
+        Ok(report
+            .rest
+            .get("painted_texels")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX)))
+    }
+}
+
 /// A [`Blender`] found on first use, so front ends can start instantly and a
 /// missing Blender only matters to the commands that need it. A failed search
 /// is retried next time, so installing Blender needs no restart.
@@ -246,6 +389,34 @@ impl LazyBlender {
         tracing::info!(version = b.version(), program = %b.program().display(), "found Blender");
         *found = Some(b.clone());
         Ok(b)
+    }
+}
+
+impl Rigger for LazyBlender {
+    fn describe(&self) -> String {
+        MeshTools::describe(self)
+    }
+
+    fn rig(&self, request: &RigRequest) -> Result<RigReport, String> {
+        self.get()?.rig(request)
+    }
+
+    fn pose_views(
+        &self,
+        reference: &Path,
+        sheet: bool,
+        textured: bool,
+        output: &Path,
+    ) -> Result<(), String> {
+        self.get()?.pose_views(reference, sheet, textured, output)
+    }
+
+    fn face_view(&self, model: &Path, output: &Path) -> Result<(), String> {
+        self.get()?.face_view(model, output)
+    }
+
+    fn project_face(&self, model: &Path, picture: &Path, output: &Path) -> Result<usize, String> {
+        self.get()?.project_face(model, picture, output)
     }
 }
 

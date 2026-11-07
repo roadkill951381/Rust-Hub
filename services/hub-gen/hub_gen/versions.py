@@ -204,7 +204,9 @@ def pull(target: str, *, say=print) -> str:
     names = sorted(set(entry["downloaded"]) | ({by_model.name} if by_model else set()))
     if not names:
         names = entry["models"]
-    from huggingface_hub import snapshot_download
+    import huggingface_hub
+
+    from hub_gen.hfdownload import exact_downloads
 
     kinds = {MODELS[n].kind for n in names}
     say(f"downloading {repo} for {', '.join(names)}")
@@ -214,7 +216,8 @@ def pull(target: str, *, say=print) -> str:
 
         path = Path(DiffusionPipeline.download(repo))
     else:
-        path = Path(snapshot_download(repo, allow_patterns=_patterns(names)))
+        with exact_downloads():
+            path = Path(huggingface_hub.snapshot_download(repo, allow_patterns=_patterns(names)))
     revision = path.name
     old = entry["revision"]
     if old and old != revision:

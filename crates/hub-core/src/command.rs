@@ -183,6 +183,71 @@ pub enum Command {
         /// Scale so the longest side is this many mm.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         size_mm: Option<f32>,
+        /// A portrait (PNG or JPEG) whose face the character keeps; the
+        /// picture is drawn in ComfyUI with PuLID. With `rig_like`, a sharp
+        /// close-up of the face is then painted onto the texture too (see
+        /// `SharpenFace`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face: Option<PathBuf>,
+        /// Draw the front, side and back, and build the shape from all of
+        /// them (Hunyuan3D-2mv): truer backs, hair and profiles.
+        #[serde(default)]
+        multiview: bool,
+        /// A rigged character (.glb) to rig the result like: the same
+        /// skeleton, rest pose and animations, so a game can swap it in. The
+        /// rigged file is the one saved to the library.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rig_like: Option<PathBuf>,
+        /// Start of the material names when rigging, e.g. `surv_mei` for
+        /// `surv_mei.body` and `surv_mei.clothes`; the reference's by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        materials: Option<String>,
+        /// When rigging, draw over the reference as it looks (its colours and
+        /// clothes) instead of a plain grey figure: for remaking that same
+        /// character. Needs `rig_like`.
+        #[serde(default)]
+        keep_look: bool,
+        /// How much of the pose guide the picture repaints, from 0 to 1:
+        /// lower keeps more of the reference's pose (and look). 0.88 by
+        /// default, 0.7 with `keep_look`. Needs `rig_like`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repaint: Option<f32>,
+    },
+    /// Rig a model (.glb) like an existing rigged character (.glb) with
+    /// Blender: the character's skeleton, rest pose and animations are kept
+    /// exactly and its meshes are swapped for the model, skinned to the same
+    /// bones. Writes `output` and adds the result to the scene to look at.
+    Rig {
+        model: PathBuf,
+        reference: PathBuf,
+        output: PathBuf,
+        /// Reduce the model to about this many triangles first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        triangles: Option<u32>,
+        /// Start of the material names, e.g. `surv_mei`; the reference's by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        materials: Option<String>,
+    },
+    /// Paint a sharp face onto a rigged, textured character (.glb, as `Rig`
+    /// writes it): Blender renders its head close up, ComfyUI redraws that
+    /// render with the likeness of `face` (FLUX with PuLID), and Blender
+    /// paints the result back onto the texture. Writes `output` and adds it
+    /// to the scene to look at.
+    SharpenFace {
+        model: PathBuf,
+        /// The portrait (PNG or JPEG) whose face to keep.
+        face: PathBuf,
+        output: PathBuf,
+        /// Who it is, e.g. the prompt the character was made from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+        /// How much of the render to redraw, from 0 to 1: more is sharper
+        /// and more like the portrait, less keeps the eyes and mouth exactly
+        /// where the model has them. 0.65 by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repaint: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed: Option<u64>,
     },
     /// Save objects as a new version of a library asset.
     SaveAsset {
@@ -250,6 +315,8 @@ impl Command {
                 | Command::Decimate { .. }
                 | Command::UvUnwrap { .. }
                 | Command::Generate { .. }
+                | Command::Rig { .. }
+                | Command::SharpenFace { .. }
         )
     }
 
@@ -273,6 +340,8 @@ impl Command {
             Command::Decimate { .. } => "Decimate",
             Command::UvUnwrap { .. } => "UV unwrap",
             Command::Generate { .. } => "Generate",
+            Command::Rig { .. } => "Rig",
+            Command::SharpenFace { .. } => "Sharpen face",
             Command::SaveAsset { .. } => "Save asset",
             Command::LoadAsset { .. } => "Load asset",
             Command::ListAssets { .. } => "List assets",

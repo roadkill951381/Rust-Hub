@@ -41,7 +41,14 @@ check_printable; generated models often need repair with \
 remove_small_shells 0.01. Use hollow for resin prints, decimate to cut \
 triangle counts for games, remesh to fuse overlapping parts, and uv_unwrap \
 before texturing (remesh, decimate and uv_unwrap run Blender). \
-check_printable also measures wall thickness against min_wall_mm (0.8 by default).";
+check_printable also measures wall thickness against min_wall_mm (0.8 by default).
+
+Game characters: generate with face (a portrait to keep the likeness of), \
+multiview true, a prompt describing the full figure in the reference's rest \
+pose (\"full body, A-pose, arms 45 degrees away from the body\"), and rig_like \
+set to the game's rigged character .glb. The result keeps that character's \
+skeleton and animations, so the game can load it in place of the old model. \
+rig does the same for a model made earlier.";
 
 /// The MCP server state: one editing session and a lazily created renderer.
 #[derive(Clone)]
@@ -250,6 +257,72 @@ pub struct GenerateArgs {
     /// Scale so the longest side is this many mm.
     #[serde(default)]
     pub size_mm: Option<f32>,
+    /// Absolute path of a portrait whose face the character should keep
+    /// (drawn in ComfyUI with PuLID). Use with a prompt describing the
+    /// whole figure, outfit and pose.
+    #[serde(default)]
+    pub face: Option<PathBuf>,
+    /// Draw front, side and back views and build the shape from all of them
+    /// (Hunyuan3D-2mv): better backs, hair and profiles for characters.
+    #[serde(default)]
+    pub multiview: bool,
+    /// Absolute path of a rigged character (.glb) to rig the result like:
+    /// same skeleton, rest pose and animations, so a game can swap it in.
+    /// Implies a texture. The prompt should ask for that character's rest
+    /// pose, usually an A-pose.
+    #[serde(default)]
+    pub rig_like: Option<PathBuf>,
+    /// Start of material names when rigging, e.g. `surv_mei` gives
+    /// `surv_mei.body` and `surv_mei.clothes`; the reference's by default.
+    #[serde(default)]
+    pub materials: Option<String>,
+    /// With `rig_like`: draw over the reference as it looks (colours,
+    /// clothes) instead of a plain grey figure, to remake that same
+    /// character with a new face or details. Repaints 0.7 by default.
+    #[serde(default)]
+    pub keep_look: bool,
+    /// With `rig_like`: how much of the reference the picture repaints, 0
+    /// to 1 (default 0.88, or 0.7 with `keep_look`). Lower keeps the pose,
+    /// arms and colours better; higher follows the prompt and face more.
+    #[serde(default)]
+    pub repaint: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RigArgs {
+    /// Absolute path of the model to rig (.glb), e.g. a generated character.
+    pub model: PathBuf,
+    /// Absolute path of a rigged character (.glb) whose skeleton, rest pose
+    /// and animations to keep.
+    pub reference: PathBuf,
+    /// Absolute path to write the rigged model (.glb).
+    pub output: PathBuf,
+    /// Reduce the model to about this many triangles first.
+    #[serde(default)]
+    pub triangles: Option<u32>,
+    /// Start of the material names, e.g. `surv_mei`; the reference's by default.
+    #[serde(default)]
+    pub materials: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SharpenFaceArgs {
+    /// Absolute path of a rigged, textured character (.glb), e.g. from rig.
+    pub model: PathBuf,
+    /// Absolute path of the portrait (PNG or JPEG) whose face to keep.
+    pub face: PathBuf,
+    /// Absolute path to write the result (.glb).
+    pub output: PathBuf,
+    /// Who it is, e.g. the prompt the character was made from.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// How much of the close-up to redraw, 0 to 1 (0.65 by default): more is
+    /// sharper and more like the portrait, less keeps the eyes and mouth
+    /// exactly where the model has them.
+    #[serde(default)]
+    pub repaint: Option<f32>,
+    #[serde(default)]
+    pub seed: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -640,6 +713,49 @@ impl HubServer {
             faces: a.faces,
             name: a.name,
             size_mm: a.size_mm,
+            face: a.face,
+            multiview: a.multiview,
+            rig_like: a.rig_like,
+            materials: a.materials,
+            keep_look: a.keep_look,
+            repaint: a.repaint,
+        };
+        self.run_job(command, context).await
+    }
+
+    #[tool(
+        description = "Rig a model (.glb) like an existing rigged character (.glb) with Blender. The character's skeleton, rest pose and animations are kept exactly, and its meshes are swapped for the model, skinned to the same bones and split into skin and clothes materials, so a game can load it in place of the old one. Writes output and adds the result to the scene. The model should stand in the reference's rest pose (usually an A-pose); arm angles that differ are corrected."
+    )]
+    async fn rig(
+        &self,
+        Parameters(a): Parameters<RigArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let command = Command::Rig {
+            model: a.model,
+            reference: a.reference,
+            output: a.output,
+            triangles: a.triangles,
+            materials: a.materials,
+        };
+        self.run_job(command, context).await
+    }
+
+    #[tool(
+        description = "Paint a sharp face onto a rigged, textured character (.glb, as rig writes it). Blender renders the head close up, ComfyUI redraws that render with the face in a portrait (FLUX with PuLID), and Blender paints it back onto the texture, so the face is crisp and like the portrait while the skeleton, animations and the rest of the texture stay as they are. generate does this by itself when given both face and rig_like. Writes output and adds it to the scene."
+    )]
+    async fn sharpen_face(
+        &self,
+        Parameters(a): Parameters<SharpenFaceArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let command = Command::SharpenFace {
+            model: a.model,
+            face: a.face,
+            output: a.output,
+            prompt: a.prompt,
+            repaint: a.repaint,
+            seed: a.seed,
         };
         self.run_job(command, context).await
     }

@@ -79,3 +79,40 @@ def on_white(image: Image.Image) -> Image.Image:
     """Composites an RGBA image over white, as TripoSG expects."""
     white = Image.new("RGBA", image.size, (255, 255, 255, 255))
     return Image.alpha_composite(white, image.convert("RGBA")).convert("RGB")
+
+
+#: The order a turnaround sheet shows its views in, left to right. "left" is
+#: Hunyuan3D-2mv's name for the view facing left (the figure's right side).
+SHEET_VIEWS = ("front", "left", "back")
+
+
+def split_sheet(image: Image.Image) -> list[Image.Image]:
+    """Splits a cut-out turnaround sheet into its figures, left to right.
+
+    Figures are runs of columns holding the object, separated by clear gaps;
+    specks under a sixth of the largest figure's area are dropped.
+    """
+    rgba = image.convert("RGBA")
+    alpha = np.asarray(rgba.getchannel("A")) > 8
+    filled = alpha.any(axis=0)
+    width = alpha.shape[1]
+    gap = max(2, width // 200)
+    runs: list[list[int]] = []
+    start, empty = None, 0
+    for x, on in enumerate(filled):
+        if on:
+            if start is None:
+                start = x
+            empty = 0
+        elif start is not None:
+            empty += 1
+            if empty >= gap:
+                runs.append([start, x - empty + 1])
+                start, empty = None, 0
+    if start is not None:
+        runs.append([start, width - empty])
+    if not runs:
+        return []
+    mass = [int(alpha[:, a:b].sum()) for a, b in runs]
+    keep = [r for r, m in zip(runs, mass, strict=True) if m >= max(mass) / 6]
+    return [rgba.crop((a, 0, b, rgba.height)) for a, b in keep]

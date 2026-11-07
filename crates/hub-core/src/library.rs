@@ -30,7 +30,7 @@ pub enum AssetSource {
     /// Saved from the scene.
     Saved,
     /// Made by the generation service.
-    Generated(GenerationInfo),
+    Generated(Box<GenerationInfo>),
 }
 
 /// One saved version of an asset.

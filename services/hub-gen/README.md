@@ -20,6 +20,7 @@ A picture skips the first step. Models load on first use and stay loaded; with
 |---|---|---|---|---|
 | `hunyuan3d-2` (default) | shape | ~6 GB | Tencent Hunyuan 3D 2.0 Community | Turbo + FlashVDM: detailed shapes in seconds |
 | `hunyuan3d-2mini` | shape | ~5 GB | same | Smaller and faster, a little less detail |
+| `hunyuan3d-2mv` | shape | ~6 GB | same | Builds from front, side and back views (`multiview`): truer backs and profiles |
 | `triposg` | shape | ~8 GB | MIT | Sharp, clean geometry; needs a TripoSG checkout |
 | `hunyuan-dit` (default) | image | ~7 GB | Tencent Hunyuan Community | What Hunyuan3D's own text-to-3D uses |
 | `flux-schnell` | image | ~12 GB | Apache 2.0 | Best at long prompts; 4-bit, slower to load |
@@ -55,9 +56,22 @@ Add `--extra flux` for FLUX.1-schnell and `--extra triposg` for TripoSG.
 
 ### Texture painting
 
-`hunyuan3d-paint` needs two small CUDA extensions from the Hunyuan3D 2 source.
-Build them once, with the CUDA Toolkit 12.8 and (on Windows) the Visual Studio
-2022 Build Tools installed, from an "x64 Native Tools" prompt:
+`hunyuan3d-paint` needs the `custom_rasterizer` CUDA extension from the
+Hunyuan3D 2 source (the `differentiable_renderer` one is optional; a slower
+pure-Python fallback is used without it). With the CUDA Toolkit 12.8 and (on
+Windows) the Visual Studio 2022 Build Tools installed, build it from an
+"x64 Native Tools" prompt with the `paint` extra:
+
+```powershell
+cd services\hub-gen
+uv sync --extra hunyuan --extra paint
+```
+
+The extension's source is kept in `vendor/custom_rasterizer`, upstream's code
+with a small fix so nvcc 12 and MSVC 14.4x can compile it on Windows (see its
+`RUST-HUB-CHANGES.md`, `LICENSE` and `NOTICE`).
+
+If that build fails, install both by hand:
 
 ```powershell
 cd services\hub-gen
@@ -67,9 +81,24 @@ uv pip install --no-build-isolation $env:TEMP\Hunyuan3D-2\hy3dgen\texgen\custom_
 uv pip install --no-build-isolation $env:TEMP\Hunyuan3D-2\hy3dgen\texgen\differentiable_renderer
 ```
 
-Shapes work without these; only `texture: true` needs them. Use
-`uv sync --inexact` from then on, because a plain `uv sync` removes packages
-it did not install itself.
+Shapes work without these; only `texture: true` needs them. After a manual
+install, use `uv sync --inexact` from then on, because a plain `uv sync`
+removes packages it did not install itself.
+
+### Several views
+
+With `multiview: true` the picture is a turnaround sheet: front, side (facing
+left) and back, side by side. hub-gen draws one from the prompt (or takes the
+one you give), cuts it into views at the gaps between figures, builds the
+shape from all of them with `hunyuan3d-2mv`, and paints with every view. A
+sheet whose figures can't be told apart is used as a single front view.
+
+After painting, the texture's colours are matched to the picture's subject
+(mean and spread in CIE Lab), because Hunyuan3D-Paint bakes them paler and
+greyer than the views it paints from.
+
+Weight downloads fetch only the files a model loads: where a folder has a
+`.safetensors` file, its `.bin`, `.ckpt` and `.pt` duplicates are skipped.
 
 ### TripoSG
 
@@ -103,10 +132,11 @@ Every setting has an environment variable and a flag (`hub-gen serve --help`).
 | `HUB_GEN_MODEL` | `hunyuan3d-2` | Shape model when a request names none |
 | `HUB_GEN_IMAGE_MODEL` | `hunyuan-dit` | Text-to-image model for prompts |
 | `HUB_GEN_TEXTURE_MODEL` | `hunyuan3d-paint` | Texture model |
+| `HUB_GEN_MULTIVIEW_MODEL` | `hunyuan3d-2mv` | Shape model for `multiview` requests that name none |
 | `HUB_GEN_DEVICE` | `cuda` | PyTorch device |
 | `HUB_GEN_LOW_VRAM` | `1` | Park idle models in system memory |
 | `HUB_GEN_IDLE_UNLOAD` | `300` | Seconds without a job before every model is unloaded, freeing the GPU and memory (`0` keeps them) |
-| `HUB_GEN_OUTPUT` | `%LOCALAPPDATA%\hub-gen\jobs` | Job folders |
+| `HUB_GEN_OUTPUT` | `~\RustHub\hub-gen\jobs` on Windows, `~/.cache/hub-gen/jobs` elsewhere | Job folders |
 | `HUB_GEN_KEEP_JOBS` | `50` | Finished jobs kept on disk |
 | `HUB_GEN_TRIPOSG_DIR` | none | TripoSG checkout |
 

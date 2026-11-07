@@ -75,6 +75,7 @@ impl Generator for RoughGenerator {
                 textured: false,
                 seconds: 0.1,
                 image: None,
+                ..GenerationInfo::default()
             },
         })
     }
@@ -103,6 +104,7 @@ async fn claude_turns_a_prompt_into_a_printable_model() {
     let engines = Engines {
         mesh_tools: None,
         generator: Some(generator(dir.path())),
+        rigger: None,
         library: Some(Library::open(dir.path().join("library"))),
     };
     let (server_io, client_io) = tokio::io::duplex(1 << 20);

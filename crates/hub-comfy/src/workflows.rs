@@ -11,6 +11,7 @@
 //! |---|---|
 //! | `{{prompt}}` | The text prompt |
 //! | `{{image}}` | The uploaded picture's name, for a `LoadImage` node |
+//! | `{{pose}}` | The uploaded pose guide's name: a grey figure to draw over |
 //! | `{{seed}}` | The seed; a string that is exactly `"{{seed}}"` becomes a number |
 
 use std::path::Path;
@@ -23,17 +24,64 @@ pub const FLUX_SCHNELL: &str = "flux-schnell";
 pub const FLUX_DEV: &str = "flux-dev";
 /// Shape from a picture with ComfyUI's built-in Hunyuan3D 2.1 nodes.
 pub const HUNYUAN3D_21: &str = "hunyuan3d-2.1";
+/// A turnaround sheet (front, side facing left, back) with FLUX.1-dev, for
+/// multiview shape models.
+pub const FLUX_DEV_SHEET: &str = "flux-dev-sheet";
+/// A full-length character with the face of `{{image}}`: FLUX.1-dev with
+/// PuLID (`ComfyUI_PuLID_Flux_ll`), a smaller FLUX so both fit 12 GB.
+pub const FLUX_PULID: &str = "flux-pulid";
+/// [`FLUX_PULID`] as a turnaround sheet.
+pub const FLUX_PULID_SHEET: &str = "flux-pulid-sheet";
+/// A sharp, evenly lit close-up of a face with the likeness of `{{image}}`,
+/// drawn over a render of a model's head so it can be painted back onto
+/// the model's texture.
+pub const FLUX_PULID_FACE: &str = "flux-pulid-face";
 
 /// Words added to a prompt so the picture suits a shape model: one whole
 /// object, centred, on a plain background.
 const PICTURE_STYLE: &str = ", a single complete object, full view, centered, plain white \
                              background, soft even studio lighting, no shadows, high detail";
 
+/// Words for a whole standing figure that a rig can be fitted to.
+const FIGURE_STYLE: &str = "full colour photo, full-length shot of the whole body from head \
+                            to toes, feet fully visible, empty space above the head and below \
+                            the feet, \
+                            standing straight in an A-pose with the arms held away from the \
+                            body and the hands open, plain light grey background, soft even \
+                            studio lighting, no shadows, high detail";
+
+/// Words for a turnaround sheet that multiview shape models split into views.
+const SHEET_STYLE: &str = "character turnaround reference sheet, the same character shown \
+                           three times side by side, evenly spaced and not overlapping: \
+                           front view, side view facing left, back view";
+
+/// Words for a face close-up that is painted back onto a model's texture:
+/// lit flat, so no light or shadow gets baked into the skin.
+const FACE_STYLE: &str = "close-up colour photo of the head and face, looking straight at the \
+                          camera, neutral expression, mouth closed, eyes open, sharp focus, \
+                          detailed skin, eyes and eyelashes, hair kept off the face, plain \
+                          light grey background, flat even studio lighting, no shadows";
+
+/// How much of a pose guide a picture repaints unless told otherwise: enough
+/// to turn a grey mannequin into a dressed person in colour (0.82 left the
+/// clothes grey), little enough to keep its place on the sheet.
+pub const POSE_DENOISE: f32 = 0.88;
+
 /// What a workflow makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Makes {
     Picture,
     Model,
+}
+
+/// The values a workflow's placeholders take; pictures are names ComfyUI
+/// gave the uploads.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Inputs<'a> {
+    pub prompt: Option<&'a str>,
+    pub image: Option<&'a str>,
+    pub pose: Option<&'a str>,
+    pub seed: u64,
 }
 
 /// A workflow ready to fill in.
@@ -72,7 +120,8 @@ impl Workflow {
             });
             format!(
                 "no ComfyUI workflow called {name:?}: the built-in ones are {FLUX_SCHNELL}, \
-                 {FLUX_DEV} and {HUNYUAN3D_21}{folder}"
+                 {FLUX_DEV}, {FLUX_DEV_SHEET}, {FLUX_PULID}, {FLUX_PULID_SHEET}, \
+                 {FLUX_PULID_FACE} and {HUNYUAN3D_21}{folder}"
             )
         })?;
         Ok(Self {
@@ -114,40 +163,94 @@ impl Workflow {
         }
     }
 
+    /// The same picture drawn over a pose guide: the built-in FLUX workflows
+    /// start from the guide (`{{pose}}`, scaled to the picture's size)
+    /// instead of noise and repaint `repaint` (0 to 1) of it. A workflow that
+    /// already takes `{{pose}}` is kept; `None` for one that can't be changed
+    /// (a person's own, or one that isn't FLUX).
+    pub fn posed(&self, repaint: f32) -> Option<Self> {
+        if self.uses("{{pose}}") {
+            return Some(self.clone());
+        }
+        let empty = &self.graph["6"];
+        if self.custom
+            || empty["class_type"] != "EmptySD3LatentImage"
+            || self.graph["7"]["class_type"] != "KSampler"
+        {
+            return None;
+        }
+        let (width, height) = (
+            empty["inputs"]["width"].clone(),
+            empty["inputs"]["height"].clone(),
+        );
+        let mut graph = self.graph.clone();
+        let nodes = graph.as_object_mut()?;
+        nodes.remove("6");
+        nodes.insert(
+            "30".into(),
+            json!({"class_type": "LoadImage", "inputs": {"image": "{{pose}}"}}),
+        );
+        nodes.insert(
+            "31".into(),
+            json!({"class_type": "ImageScale", "inputs": {
+                "image": ["30", 0], "upscale_method": "lanczos",
+                "width": width, "height": height, "crop": "center"
+            }}),
+        );
+        nodes.insert(
+            "32".into(),
+            json!({"class_type": "VAEEncode", "inputs": {"pixels": ["31", 0], "vae": ["3", 0]}}),
+        );
+        graph["7"]["inputs"]["latent_image"] = json!(["32", 0]);
+        graph["7"]["inputs"]["denoise"] = json!(repaint.clamp(0.0, 1.0));
+        Some(Self {
+            name: self.name.clone(),
+            graph,
+            custom: false,
+        })
+    }
+
     /// The graph with every placeholder replaced.
-    pub fn fill(
-        &self,
-        prompt: Option<&str>,
-        image: Option<&str>,
-        seed: u64,
-    ) -> Result<Value, String> {
-        fn walk(v: &mut Value, prompt: &str, image: &str, seed: u64) {
+    pub fn fill(&self, inputs: &Inputs<'_>) -> Result<Value, String> {
+        fn walk(v: &mut Value, inputs: &Inputs<'_>) {
             match v {
-                Value::String(s) if s == "{{seed}}" => *v = Value::from(seed),
+                Value::String(s) if s == "{{seed}}" => *v = Value::from(inputs.seed),
                 Value::String(s) => {
                     if s.contains("{{") {
                         *s = s
-                            .replace("{{prompt}}", prompt)
-                            .replace("{{image}}", image)
-                            .replace("{{seed}}", &seed.to_string());
+                            .replace("{{prompt}}", inputs.prompt.unwrap_or(""))
+                            .replace("{{image}}", inputs.image.unwrap_or(""))
+                            .replace("{{pose}}", inputs.pose.unwrap_or(""))
+                            .replace("{{seed}}", &inputs.seed.to_string());
                     }
                 }
-                Value::Array(items) => items.iter_mut().for_each(|i| walk(i, prompt, image, seed)),
-                Value::Object(map) => map.values_mut().for_each(|i| walk(i, prompt, image, seed)),
+                Value::Array(items) => items.iter_mut().for_each(|i| walk(i, inputs)),
+                Value::Object(map) => map.values_mut().for_each(|i| walk(i, inputs)),
                 _ => {}
             }
         }
-        if self.uses("{{prompt}}") && prompt.is_none() {
+        if self.uses("{{prompt}}") && inputs.prompt.is_none() {
             return Err(format!("the ComfyUI workflow {} needs a prompt", self.name));
         }
-        if self.uses("{{image}}") && image.is_none() {
+        if self.uses("{{image}}") && inputs.image.is_none() {
+            return Err(if self.uses("{{prompt}}") {
+                format!(
+                    "the ComfyUI workflow {} needs a face picture (a portrait) as well as \
+                     the prompt",
+                    self.name
+                )
+            } else {
+                format!("the ComfyUI workflow {} needs a picture", self.name)
+            });
+        }
+        if self.uses("{{pose}}") && inputs.pose.is_none() {
             return Err(format!(
-                "the ComfyUI workflow {} needs a picture",
+                "the ComfyUI workflow {} needs a pose guide (give a character to rig like)",
                 self.name
             ));
         }
         let mut graph = self.graph.clone();
-        walk(&mut graph, prompt.unwrap_or(""), image.unwrap_or(""), seed);
+        walk(&mut graph, inputs);
         Ok(graph)
     }
 }
@@ -170,13 +273,47 @@ fn check_api_format(graph: &Value, path: &Path) -> Result<(), String> {
 }
 
 fn builtin(name: &str) -> Option<Value> {
+    let object = Shot {
+        style: PICTURE_STYLE.to_owned(),
+        width: 1024,
+        height: 1024,
+    };
+    let figure = Shot {
+        style: format!(", {FIGURE_STYLE}"),
+        width: 832,
+        height: 1216,
+    };
+    let sheet = Shot {
+        style: format!(", {SHEET_STYLE}, each {FIGURE_STYLE}"),
+        width: 1536,
+        height: 768,
+    };
+    let face = Shot {
+        style: format!(", {FACE_STYLE}"),
+        width: 1024,
+        height: 1024,
+    };
     match name {
-        FLUX_SCHNELL => Some(flux("flux1-schnell-Q8_0.gguf", 4, None)),
-        FLUX_DEV => Some(flux("flux1-dev-Q8_0.gguf", 20, Some(3.5))),
+        FLUX_SCHNELL => Some(flux("flux1-schnell-Q8_0.gguf", 4, None, &object)),
+        FLUX_DEV => Some(flux("flux1-dev-Q8_0.gguf", 20, Some(3.5), &object)),
+        FLUX_DEV_SHEET => Some(flux("flux1-dev-Q8_0.gguf", 24, Some(3.5), &sheet)),
+        FLUX_PULID => Some(with_pulid(flux(PULID_UNET, 24, Some(3.5), &figure))),
+        FLUX_PULID_SHEET => Some(with_pulid(flux(PULID_UNET, 24, Some(3.5), &sheet))),
+        FLUX_PULID_FACE => Some(with_pulid(flux(PULID_UNET, 24, Some(3.5), &face))),
         HUNYUAN3D_21 => Some(hunyuan3d_21()),
         _ => None,
     }
 }
+
+/// The text after the prompt and the picture's size.
+struct Shot {
+    style: String,
+    width: u32,
+    height: u32,
+}
+
+/// FLUX.1-dev small enough to share 12 GB with PuLID's encoders.
+const PULID_UNET: &str = "flux1-dev-Q5_K_S.gguf";
 
 /// A model file a built-in workflow loads, and where it comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,7 +331,15 @@ pub struct ModelFile {
 
 const UNET: &[&str] = &["unet", "diffusion_models"];
 const TEXT: &[&str] = &["text_encoders", "clip"];
-const FLUXES: &[&str] = &[FLUX_SCHNELL, FLUX_DEV];
+const FLUXES: &[&str] = &[
+    FLUX_SCHNELL,
+    FLUX_DEV,
+    FLUX_DEV_SHEET,
+    FLUX_PULID,
+    FLUX_PULID_SHEET,
+    FLUX_PULID_FACE,
+];
+const PULIDS: &[&str] = &[FLUX_PULID, FLUX_PULID_SHEET, FLUX_PULID_FACE];
 
 /// Every file the built-in workflows load.
 pub const MODEL_FILES: &[ModelFile] = &[
@@ -210,7 +355,21 @@ pub const MODEL_FILES: &[ModelFile] = &[
         folders: UNET,
         repo: "city96/FLUX.1-dev-gguf",
         gated: false,
-        workflows: &[FLUX_DEV],
+        workflows: &[FLUX_DEV, FLUX_DEV_SHEET],
+    },
+    ModelFile {
+        name: PULID_UNET,
+        folders: UNET,
+        repo: "city96/FLUX.1-dev-gguf",
+        gated: false,
+        workflows: PULIDS,
+    },
+    ModelFile {
+        name: "pulid_flux_v0.9.1.safetensors",
+        folders: &["pulid"],
+        repo: "guozinan/PuLID",
+        gated: false,
+        workflows: PULIDS,
     },
     ModelFile {
         name: "t5xxl_fp8_e4m3fn.safetensors",
@@ -243,7 +402,7 @@ pub const MODEL_FILES: &[ModelFile] = &[
 ];
 
 /// FLUX through ComfyUI-GGUF's loader, the way a 12 to 16 GB card runs it.
-fn flux(unet: &str, steps: u32, guidance: Option<f32>) -> Value {
+fn flux(unet: &str, steps: u32, guidance: Option<f32>, shot: &Shot) -> Value {
     let positive = if guidance.is_some() {
         json!(["10", 0])
     } else {
@@ -258,12 +417,12 @@ fn flux(unet: &str, steps: u32, guidance: Option<f32>) -> Value {
         }},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": "ae.safetensors"}},
         "4": {"class_type": "CLIPTextEncode", "inputs": {
-            "text": format!("{{{{prompt}}}}{PICTURE_STYLE}"),
+            "text": format!("{{{{prompt}}}}{}", shot.style),
             "clip": ["2", 0]
         }},
         "5": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["4", 0]}},
         "6": {"class_type": "EmptySD3LatentImage", "inputs": {
-            "width": 1024, "height": 1024, "batch_size": 1
+            "width": shot.width, "height": shot.height, "batch_size": 1
         }},
         "7": {"class_type": "KSampler", "inputs": {
             "model": ["1", 0],
@@ -287,6 +446,31 @@ fn flux(unet: &str, steps: u32, guidance: Option<f32>) -> Value {
             "conditioning": ["4", 0], "guidance": g
         }});
     }
+    graph
+}
+
+/// Puts PuLID between the FLUX model and the sampler, so the picture keeps
+/// the face in `{{image}}` (`ComfyUI_PuLID_Flux_ll` nodes; its EVA-CLIP and
+/// InsightFace models download on first use).
+fn with_pulid(mut graph: Value) -> Value {
+    graph["20"] = json!({"class_type": "PulidFluxModelLoader", "inputs": {
+        "pulid_file": "pulid_flux_v0.9.1.safetensors"
+    }});
+    graph["21"] = json!({"class_type": "PulidFluxEvaClipLoader", "inputs": {}});
+    graph["22"] =
+        json!({"class_type": "PulidFluxInsightFaceLoader", "inputs": {"provider": "CUDA"}});
+    graph["23"] = json!({"class_type": "LoadImage", "inputs": {"image": "{{image}}"}});
+    graph["24"] = json!({"class_type": "ApplyPulidFlux", "inputs": {
+        "model": ["1", 0],
+        "pulid_flux": ["20", 0],
+        "eva_clip": ["21", 0],
+        "face_analysis": ["22", 0],
+        "image": ["23", 0],
+        "weight": 1.0,
+        "start_at": 0.0,
+        "end_at": 1.0
+    }});
+    graph["7"]["inputs"]["model"] = json!(["24", 0]);
     graph
 }
 
@@ -329,28 +513,42 @@ fn hunyuan3d_21() -> Value {
 mod tests {
     use super::*;
 
+    fn inputs<'a>(prompt: Option<&'a str>, image: Option<&'a str>, seed: u64) -> Inputs<'a> {
+        Inputs {
+            prompt,
+            image,
+            pose: None,
+            seed,
+        }
+    }
+
     #[test]
     fn builtins_fill_in_and_say_what_they_make() {
         let flux = Workflow::load(FLUX_SCHNELL, None).unwrap();
         assert_eq!(flux.makes(), Makes::Picture);
-        let g = flux.fill(Some("a stone owl"), None, 42).unwrap();
+        let g = flux.fill(&inputs(Some("a stone owl"), None, 42)).unwrap();
         assert_eq!(g["7"]["inputs"]["seed"], json!(42));
         let text = g["4"]["inputs"]["text"].as_str().unwrap();
         assert!(
             text.starts_with("a stone owl, a single complete object"),
             "{text}"
         );
-        assert!(flux.fill(None, None, 1).is_err());
+        assert!(flux.fill(&inputs(None, None, 1)).is_err());
 
         let dev = Workflow::load(FLUX_DEV, None).unwrap();
-        let g = dev.fill(Some("x"), None, 1).unwrap();
+        let g = dev.fill(&inputs(Some("x"), None, 1)).unwrap();
         assert_eq!(g["7"]["inputs"]["positive"], json!(["10", 0]));
         assert_eq!(g["7"]["inputs"]["steps"], json!(20));
 
         let shape = Workflow::load(HUNYUAN3D_21, None).unwrap();
         assert_eq!(shape.makes(), Makes::Model);
-        assert!(shape.fill(None, None, 1).unwrap_err().contains("picture"));
-        let g = shape.fill(None, Some("owl.png"), 7).unwrap();
+        assert!(
+            shape
+                .fill(&inputs(None, None, 1))
+                .unwrap_err()
+                .contains("picture")
+        );
+        let g = shape.fill(&inputs(None, Some("owl.png"), 7)).unwrap();
         assert_eq!(g["2"]["inputs"]["image"], json!("owl.png"));
     }
 
@@ -363,7 +561,7 @@ mod tests {
         let w = Workflow::load(FLUX_SCHNELL, Some(dir.path())).unwrap();
         assert!(w.custom);
         assert_eq!(
-            w.fill(Some("p"), None, 1).unwrap()["1"]["inputs"]["filename_prefix"],
+            w.fill(&inputs(Some("p"), None, 1)).unwrap()["1"]["inputs"]["filename_prefix"],
             json!("p")
         );
 
@@ -375,8 +573,109 @@ mod tests {
     }
 
     #[test]
+    fn character_workflows_take_a_face_and_draw_whole_figures() {
+        let pulid = Workflow::load(FLUX_PULID, None).unwrap();
+        assert_eq!(pulid.makes(), Makes::Picture);
+        let err = pulid.fill(&inputs(Some("Mei"), None, 1)).unwrap_err();
+        assert!(err.contains("face picture"), "{err}");
+        let g = pulid
+            .fill(&inputs(Some("Mei"), Some("mei.png"), 12))
+            .unwrap();
+        assert_eq!(g["23"]["inputs"]["image"], json!("mei.png"));
+        assert_eq!(g["7"]["inputs"]["model"], json!(["24", 0]));
+        let mut apply: Vec<_> = g["24"]["inputs"].as_object().unwrap().keys().collect();
+        apply.sort();
+        assert_eq!(
+            apply,
+            [
+                "end_at",
+                "eva_clip",
+                "face_analysis",
+                "image",
+                "model",
+                "pulid_flux",
+                "start_at",
+                "weight"
+            ],
+            "ApplyPulidFlux's inputs in ComfyUI_PuLID_Flux_ll"
+        );
+        assert!(
+            g["4"]["inputs"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("A-pose")
+        );
+
+        let sheet = Workflow::load(FLUX_PULID_SHEET, None).unwrap();
+        let g = sheet
+            .fill(&inputs(Some("Mei"), Some("mei.png"), 12))
+            .unwrap();
+        assert_eq!(g["6"]["inputs"]["width"], json!(1536));
+        let text = g["4"]["inputs"]["text"].as_str().unwrap();
+        assert!(
+            text.contains("front view, side view facing left, back view"),
+            "{text}"
+        );
+        assert!(
+            !Workflow::load(FLUX_DEV_SHEET, None)
+                .unwrap()
+                .uses("{{image}}")
+        );
+    }
+
+    #[test]
+    fn pictures_can_be_drawn_over_a_pose_guide() {
+        let sheet = Workflow::load(FLUX_PULID_SHEET, None).unwrap();
+        let posed = sheet.posed(POSE_DENOISE).unwrap();
+        assert!(posed.uses("{{pose}}") && posed.uses("{{image}}"));
+        let err = posed
+            .fill(&inputs(Some("Mei"), Some("mei.png"), 1))
+            .unwrap_err();
+        assert!(err.contains("pose guide"), "{err}");
+        let g = posed
+            .fill(&Inputs {
+                pose: Some("pose.png"),
+                ..inputs(Some("Mei"), Some("mei.png"), 1)
+            })
+            .unwrap();
+        assert!(g.get("6").is_none(), "no empty latent");
+        assert_eq!(g["30"]["inputs"]["image"], json!("pose.png"));
+        assert_eq!(g["31"]["inputs"]["width"], json!(1536));
+        assert_eq!(g["7"]["inputs"]["latent_image"], json!(["32", 0]));
+        assert_eq!(g["7"]["inputs"]["denoise"], json!(POSE_DENOISE));
+        assert_eq!(
+            posed.posed(POSE_DENOISE),
+            Some(posed.clone()),
+            "posing twice changes nothing"
+        );
+
+        assert!(
+            Workflow::load(HUNYUAN3D_21, None)
+                .unwrap()
+                .posed(POSE_DENOISE)
+                .is_none()
+        );
+        let mine = Workflow {
+            custom: true,
+            ..Workflow::load(FLUX_DEV, None).unwrap()
+        };
+        assert!(
+            mine.posed(POSE_DENOISE).is_none(),
+            "a person's own workflow is left alone"
+        );
+    }
+
+    #[test]
     fn every_file_a_builtin_loads_is_listed() {
-        for name in [FLUX_SCHNELL, FLUX_DEV, HUNYUAN3D_21] {
+        for name in [
+            FLUX_SCHNELL,
+            FLUX_DEV,
+            FLUX_DEV_SHEET,
+            FLUX_PULID,
+            FLUX_PULID_SHEET,
+            FLUX_PULID_FACE,
+            HUNYUAN3D_21,
+        ] {
             let graph = builtin(name).unwrap().to_string();
             let listed: Vec<_> = MODEL_FILES
                 .iter()

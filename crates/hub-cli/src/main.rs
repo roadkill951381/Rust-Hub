@@ -87,9 +87,71 @@ enum Cmd {
         /// Scale so the longest side is this many millimetres.
         #[arg(long)]
         size_mm: Option<f32>,
-        /// Also write the result here (.glb, .gltf, .stl or .3mf).
+        /// A portrait whose face the character keeps (PuLID in ComfyUI).
+        #[arg(long)]
+        face: Option<PathBuf>,
+        /// Draw front, side and back views and build the shape from all of them.
+        #[arg(long)]
+        multiview: bool,
+        /// A rigged character (.glb) to rig the result like, keeping its
+        /// skeleton and animations. Describe its rest pose in the prompt.
+        #[arg(long, value_name = "GLB")]
+        rig_like: Option<PathBuf>,
+        /// Start of the material names when rigging, e.g. `surv_mei`.
+        #[arg(long, requires = "rig_like")]
+        materials: Option<String>,
+        /// Draw over the reference as it looks instead of a grey figure, to
+        /// remake that same character.
+        #[arg(long, requires = "rig_like")]
+        keep_look: bool,
+        /// How much of the reference the picture repaints, 0 to 1 (default
+        /// 0.88, or 0.7 with --keep-look).
+        #[arg(long, requires = "rig_like")]
+        repaint: Option<f32>,
+        /// Also write the result here (.glb, .gltf, .stl or .3mf). A rigged
+        /// character is copied as the rigged .glb.
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+    /// Rig a model like an existing rigged character with Blender, keeping
+    /// the character's skeleton, rest pose and animations.
+    Rig {
+        /// The model to rig (.glb).
+        model: PathBuf,
+        /// The rigged character to copy the skeleton from (.glb).
+        #[arg(long)]
+        like: PathBuf,
+        /// Where to write the rigged model (.glb).
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Reduce the model to about this many triangles first.
+        #[arg(long)]
+        triangles: Option<u32>,
+        /// Start of the material names, e.g. `surv_mei` (the reference's by default).
+        #[arg(long)]
+        materials: Option<String>,
+    },
+    /// Paint a sharp face onto a rigged character (.glb, as `rig` writes it):
+    /// Blender renders the head close up, ComfyUI redraws it with the face in
+    /// a portrait (FLUX with PuLID), and Blender paints it onto the texture.
+    SharpenFace {
+        /// The rigged, textured character (.glb).
+        model: PathBuf,
+        /// The portrait whose face to keep (PNG or JPEG).
+        #[arg(long)]
+        face: PathBuf,
+        /// Where to write the result (.glb).
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Who it is, e.g. the prompt the character was made from.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// How much of the close-up to redraw, 0 to 1 (0.65 by default):
+        /// more is sharper and more like the portrait.
+        #[arg(long)]
+        repaint: Option<f32>,
+        #[arg(long)]
+        seed: Option<u64>,
     },
     /// List the asset library, optionally only names containing QUERY.
     Assets { query: Option<String> },
@@ -240,8 +302,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
             faces,
             name,
             size_mm,
+            face,
+            multiview,
+            rig_like,
+            materials,
+            keep_look,
+            repaint,
             output,
         } => {
+            let rigged = rig_like.is_some();
             let outcome = run_with_progress(
                 &mut session,
                 Command::Generate {
@@ -254,19 +323,77 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     faces,
                     name,
                     size_mm,
+                    face,
+                    multiview,
+                    rig_like,
+                    materials,
+                    keep_look,
+                    repaint,
                 },
             )?;
             print(json, &outcome);
-            if let Some(path) = output {
-                print(
+            match (output, &outcome.path) {
+                // The scene has no skeletons, so copy the rigged file itself.
+                (Some(path), Some(file)) if rigged => {
+                    if !path
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("glb"))
+                    {
+                        bail!("a rigged character is written as .glb; use a .glb output");
+                    }
+                    std::fs::copy(file, &path)?;
+                    eprintln!("wrote {}", path.display());
+                }
+                (Some(path), _) => print(
                     json,
                     &session.execute(Command::Export {
                         path,
                         objects: None,
                     })?,
-                );
+                ),
+                (None, _) => {}
             }
         }
+        Cmd::Rig {
+            model,
+            like,
+            output,
+            triangles,
+            materials,
+        } => print(
+            json,
+            &run_with_progress(
+                &mut session,
+                Command::Rig {
+                    model,
+                    reference: like,
+                    output,
+                    triangles,
+                    materials,
+                },
+            )?,
+        ),
+        Cmd::SharpenFace {
+            model,
+            face,
+            output,
+            prompt,
+            repaint,
+            seed,
+        } => print(
+            json,
+            &run_with_progress(
+                &mut session,
+                Command::SharpenFace {
+                    model,
+                    face,
+                    output,
+                    prompt,
+                    repaint,
+                    seed,
+                },
+            )?,
+        ),
         Cmd::Assets { query } => print(json, &session.execute(Command::ListAssets { query })?),
         Cmd::Run { script } => return run_script(&mut session, &script, json),
         Cmd::Updates { apply, all } => return updates(apply.as_deref(), all, json),

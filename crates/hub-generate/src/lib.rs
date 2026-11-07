@@ -102,6 +102,9 @@ struct JobRequest<'a> {
     seed: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     faces: Option<u32>,
+    /// The picture is a turnaround sheet: build the shape from its views.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    multiview: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +129,9 @@ struct JobResult {
     seed: u64,
     seconds: f32,
     textured: bool,
+    /// The views the shape was built from, when there were several.
+    #[serde(default)]
+    views: Vec<String>,
     files: std::collections::HashMap<String, String>,
 }
 
@@ -281,6 +287,7 @@ impl Client {
             texture: request.texture,
             seed: request.seed,
             faces: request.faces,
+            multiview: request.multiview,
         };
         let response = self
             .authorize(self.agent.post(format!("{}/v1/jobs", self.base)))
@@ -363,6 +370,10 @@ impl Generator for Client {
                 textured: result.textured,
                 seconds: result.seconds,
                 image,
+                face: request.face.clone(),
+                multiview: result.views.len() > 1,
+                rig: None,
+                face_close_up: None,
             },
         })
     }

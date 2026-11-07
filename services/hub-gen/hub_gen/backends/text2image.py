@@ -12,6 +12,12 @@ SUFFIX = (
     ", a single complete object, full view, centered, plain white background, "
     "soft even studio lighting, 3D render"
 )
+#: Steers a prompt toward a turnaround sheet for multiview shape models.
+SHEET = (
+    ", character turnaround reference sheet, the same subject shown three times side by side "
+    "and evenly spaced, not overlapping: front view, side view facing left, back view; "
+    "full length, plain white background, soft even studio lighting, 3D render"
+)
 NEGATIVE = (
     "text, watermark, cropped, out of frame, multiple objects, cluttered background, "
     "strong shadows, low quality, blurry, deformed"
@@ -35,7 +41,9 @@ class HunyuanDiT:
         else:
             self.pipe.to(settings.device)
 
-    def generate(self, prompt: str, *, seed: int, report: Report) -> Image.Image:
+    def generate(
+        self, prompt: str, *, seed: int, report: Report, sheet: bool = False
+    ) -> Image.Image:
         steps = 25
 
         def on_step(_pipe: object, i: int, _t: object, kwargs: dict) -> dict:
@@ -43,12 +51,12 @@ class HunyuanDiT:
             return kwargs
 
         return self.pipe(
-            prompt=prompt + SUFFIX,
+            prompt=prompt + (SHEET if sheet else SUFFIX),
             negative_prompt=NEGATIVE,
             num_inference_steps=steps,
             pag_scale=1.3,
-            width=1024,
-            height=1024,
+            width=1536 if sheet else 1024,
+            height=768 if sheet else 1024,
             generator=self._torch.Generator(device="cpu").manual_seed(seed),
             callback_on_step_end=on_step,
         ).images[0]
@@ -75,7 +83,9 @@ class FluxSchnell:
         )
         self.pipe.enable_model_cpu_offload()
 
-    def generate(self, prompt: str, *, seed: int, report: Report) -> Image.Image:
+    def generate(
+        self, prompt: str, *, seed: int, report: Report, sheet: bool = False
+    ) -> Image.Image:
         steps = 4
 
         def on_step(_pipe: object, i: int, _t: object, kwargs: dict) -> dict:
@@ -83,12 +93,12 @@ class FluxSchnell:
             return kwargs
 
         return self.pipe(
-            prompt=prompt + SUFFIX,
+            prompt=prompt + (SHEET if sheet else SUFFIX),
             guidance_scale=0.0,
             num_inference_steps=steps,
             max_sequence_length=256,
-            width=1024,
-            height=1024,
+            width=1536 if sheet else 1024,
+            height=768 if sheet else 1024,
             generator=self._torch.Generator(device="cpu").manual_seed(seed),
             callback_on_step_end=on_step,
         ).images[0]
