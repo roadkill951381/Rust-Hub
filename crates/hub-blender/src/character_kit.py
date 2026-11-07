@@ -280,7 +280,7 @@ def is_cutout(obj, mat):
     for n in mat.node_tree.nodes:
         if n.type == "TEX_IMAGE" and n.image and n.image.channels == 4 and n.image.size[0] > 0:
             a = pixels(n.image)[..., 3]
-            if (a < 0.5).mean() > 0.01:
+            if (a < 0.5).mean() > 0.05:  # eye textures have a sliver of clear texels; they stay opaque
                 return True
     return False
 
