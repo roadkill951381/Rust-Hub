@@ -503,6 +503,7 @@ impl Session {
                 output,
                 strength,
                 max_texture,
+                jpeg,
             } => {
                 rigger(&self.engines)?;
                 must_exist(&model)?;
@@ -525,6 +526,7 @@ impl Session {
                     output,
                     strength: strength.unwrap_or(1.0),
                     max_size: max_texture,
+                    jpeg,
                 })
             }
             other => unreachable!("{} is not a job", other.label()),
@@ -864,10 +866,15 @@ impl JobOutput {
             WorkResult::Coloured { request, report } => {
                 let created = add_file(scene, engines, &request.output)?;
                 let [w, h] = report.texture_size;
+                let note = report
+                    .note
+                    .as_deref()
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default();
                 Ok(Outcome {
                     summary: format!(
                         "Matched {} to {}'s colours: skin x{:.2}, clothes x{:.2} \
-                         in linear light, texture {w}x{h}; wrote {}",
+                         in linear light{note}, texture {w}x{h}; wrote {}",
                         file_name(&request.model),
                         file_name(&request.like),
                         report.skin_factor,
@@ -2093,6 +2100,7 @@ mod tests {
                 skin_factor: 0.5 * request.strength,
                 clothes_factor: 0.25,
                 texture_size: [request.max_size.unwrap_or(2048); 2],
+                note: None,
             })
         }
 
@@ -2284,6 +2292,7 @@ mod tests {
             output: output.clone(),
             strength,
             max_texture,
+            jpeg: true,
         };
         let mut s = Session::with_engines(Engines {
             rigger: Some(Arc::new(FakeRigger)),
@@ -2309,7 +2318,8 @@ mod tests {
                 like: model,
                 output,
                 strength: None,
-                max_texture: None
+                max_texture: None,
+                jpeg: false,
             }
             .is_job()
         );

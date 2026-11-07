@@ -1,13 +1,15 @@
 """Builds a rigged reference character and an unrigged 'generated' model,
 for the rigging test in `blender_jobs.rs`.
 
-blender -b --python rig_fixtures.py -- OUTDIR [arm_deg_ref] [arm_deg_model] [turn] [beard]
+blender -b --python rig_fixtures.py -- OUTDIR [arm_deg_ref] [arm_deg_model] [turn] [beard|shadow]
 
 The reference is a capsule figure on a mixamorig-named skeleton in an A-pose,
 with a short idle action. The model is fatter, holds its arms at another
 angle, is textured skin on the head and hands and dark elsewhere, and can face
 the other way, like a generated character. With ``beard``, its skin is dark
-brown, its clothes dark grey, and a darker beard covers the lower face.
+brown, its clothes dark grey, and a darker beard covers the lower face. With
+``shadow``, one side of the face is in shadow, painted into the texture as
+generated textures often have it.
 """
 
 import math
@@ -26,6 +28,7 @@ ref_angle = float(args[1]) if len(args) > 1 else 47.0
 model_angle = float(args[2]) if len(args) > 2 else 32.0
 turn = len(args) > 3 and args[3] == "turn"
 beard = len(args) > 4 and args[4] == "beard"
+shadow = len(args) > 4 and args[4] == "shadow"
 
 BONES = {
     # name: (head, tail, parent)
@@ -173,6 +176,9 @@ for y in range(256):
         # (v 0.23 to 0.44; see the UVs below).
         if beard and x < 60 and 60 <= y <= 112:
             px += [*BEARD, 1.0]
+        elif shadow and x < 30:
+            # One side of the face at 40% of the skin's brightness.
+            px += [*(0.4 * c for c in SKIN), 1.0]
         else:
             px += [*SKIN, 1.0] if x < 128 else [*CLOTHES, 1.0]
 img.pixels = px

@@ -340,6 +340,9 @@ pub struct MatchColoursArgs {
     /// Shrink the texture to at most this many pixels a side, e.g. 1024.
     #[serde(default)]
     pub max_texture: Option<u32>,
+    /// Write the texture as a JPEG, several times smaller than a PNG.
+    #[serde(default)]
+    pub jpeg: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -791,6 +794,7 @@ impl HubServer {
             output: a.output,
             strength: a.strength,
             max_texture: a.max_texture,
+            jpeg: a.jpeg,
         };
         self.run_job(command, context).await
     }

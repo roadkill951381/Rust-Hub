@@ -247,6 +247,9 @@ pub struct ColourRequest {
     /// Shrink the texture to at most this many pixels a side.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_size: Option<u32>,
+    /// Write the texture as a JPEG, several times smaller than a PNG.
+    #[serde(default)]
+    pub jpeg: bool,
 }
 
 /// What [`Rigger::match_colours`] did.
@@ -258,6 +261,9 @@ pub struct ColourReport {
     pub clothes_factor: f32,
     /// The texture's width and height as written.
     pub texture_size: [u32; 2],
+    /// Why a part was left as it was, e.g. the reference has no skin material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Rigs models like an existing character.

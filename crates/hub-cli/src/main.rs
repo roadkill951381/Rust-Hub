@@ -171,6 +171,9 @@ enum Cmd {
         /// Shrink the texture to at most this many pixels a side, e.g. 1024.
         #[arg(long)]
         max_texture: Option<u32>,
+        /// Write the texture as a JPEG, several times smaller than a PNG.
+        #[arg(long)]
+        jpeg: bool,
     },
     /// List the asset library, optionally only names containing QUERY.
     Assets { query: Option<String> },
@@ -419,6 +422,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             output,
             strength,
             max_texture,
+            jpeg,
         } => print(
             json,
             &run_with_progress(
@@ -429,6 +433,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     output,
                     strength,
                     max_texture,
+                    jpeg,
                 },
             )?,
         ),

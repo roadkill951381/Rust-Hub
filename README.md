@@ -187,9 +187,10 @@ game's lights often look washed out next to its own characters.
 `hub match-colours rigged.glb --like character.glb -o matched.glb` darkens or
 lightens the skin and the clothes, each as a whole and keeping their hues, to
 the brightness of the same parts of the game's character (`--strength` from
-0 to 1 goes part of the way; each part moves at most from 0.15 to 2 times its
-brightness). `--max-texture 1024` also shrinks the texture to the game's
-size. Run it last, after `sharpen-face`.
+0 to 1 goes part of the way; the clothes move at most from 0.15 to 2 times
+their brightness, the skin from 0.6 to 1.4). `--max-texture 1024` shrinks the
+texture to the game's size and `--jpeg` writes it as a JPEG, several times
+smaller. Run it last, after `sharpen-face`.
 
 ### Keep everything up to date
 

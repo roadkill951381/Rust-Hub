@@ -268,6 +268,10 @@ pub enum Command {
         /// Shrink the texture to at most this many pixels a side.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_texture: Option<u32>,
+        /// Write the texture as a JPEG (quality 90), several times smaller
+        /// than a PNG; for textures without transparency.
+        #[serde(default)]
+        jpeg: bool,
     },
     /// Save objects as a new version of a library asset.
     SaveAsset {

@@ -666,8 +666,13 @@ def project_face(job):
 #: Materials that are neither skin nor clothes: eyes, brows, teeth...
 NOT_SKIN_OR_CLOTHES = ("eye", "brow", "lash", "teeth", "tongue", "low-poly")
 
-#: How far ``match_colours`` may darken or lighten a part, in linear light.
-COLOUR_FACTOR_LIMITS = (0.15, 2.0)
+#: How far ``match_colours`` may darken or lighten each part, in linear
+#: light. Skin moves less: its tone comes from the portrait, and a beard or
+#: stubble in the skin material can skew its measure.
+COLOUR_FACTOR_LIMITS = {"skin": (0.6, 1.4), "clothes": (0.15, 2.0)}
+
+#: JPEG quality for ``match_colours`` textures written as JPEG.
+JPEG_QUALITY = 90
 
 
 def srgb_to_linear(c):
@@ -715,12 +720,21 @@ def material_image(mat):
     return None, np.ones(3)
 
 
-def part_brightness(objects):
-    """Mean linear luminance of the skin and of the clothes over the
-    surface of ``objects``, weighting each face by its area."""
+def weighted_median(values, weights):
     import numpy as np
 
-    totals = {"skin": [0.0, 0.0], "clothes": [0.0, 0.0]}
+    order = np.argsort(values)
+    cumulative = np.cumsum(weights[order])
+    return float(values[order][np.searchsorted(cumulative, cumulative[-1] / 2)])
+
+
+def part_brightness(objects):
+    """The median linear luminance of the skin and of the clothes over the
+    surface of ``objects``, weighting each face by its area: the median, so a
+    beard, a belt or a shadow doesn't move it much."""
+    import numpy as np
+
+    found = {"skin": ([], []), "clothes": ([], [])}
     for obj in objects:
         mesh = obj.data
         n = len(mesh.polygons)
@@ -737,15 +751,20 @@ def part_brightness(objects):
                 continue
             image, colour = material_image(slot.material)
             if image is not None:
-                found = face_colours(obj, image)
-                if found is None:
+                colours = face_colours(obj, image)
+                if colours is None:
                     continue
-                lum = luminance(srgb_to_linear(found[faces].astype(np.float64)))
+                lum = luminance(srgb_to_linear(colours[faces].astype(np.float64)))
             else:
                 lum = np.full(len(faces), luminance(colour))
-            totals[part][0] += float((lum * area[faces]).sum())
-            totals[part][1] += float(area[faces].sum())
-    return {part: (s / a if a > 0 else None) for part, (s, a) in totals.items()}
+            found[part][0].append(lum)
+            found[part][1].append(area[faces])
+    out = {}
+    for part, (lums, areas) in found.items():
+        lums = np.concatenate(lums) if lums else np.zeros(0)
+        areas = np.concatenate(areas) if areas else np.zeros(0)
+        out[part] = weighted_median(lums, areas) if areas.sum() > 0 else None
+    return out
 
 
 def uv_cover(obj, faces, size):
@@ -809,7 +828,8 @@ def box_blur(a, radius):
 def match_colours(job):
     """Writes the rigged model with its skin and clothes as bright as the
     reference's (``strength`` 1 matches them, 0 changes nothing), and its
-    texture no larger than ``max_size`` pixels a side."""
+    texture no larger than ``max_size`` pixels a side, as a JPEG with
+    ``jpeg``."""
     import os
 
     import numpy as np
@@ -817,6 +837,7 @@ def match_colours(job):
     params = job.get("params", {})
     strength = float(params.get("strength", 1.0))
     max_size = params.get("max_size")
+    jpeg = bool(params.get("jpeg"))
 
     _arm, like = load_reference(params["like"])
     target = part_brightness(like)
@@ -834,14 +855,18 @@ def match_colours(job):
     if texture is None:
         raise ValueError("the model has no texture to change")
 
-    lo, hi = COLOUR_FACTOR_LIMITS
-    factors = {}
+    factors, notes = {}, []
     for part in ("skin", "clothes"):
+        lo, hi = COLOUR_FACTOR_LIMITS[part]
         if target[part] and current[part]:
             ratio = target[part] / current[part]
             factors[part] = float(np.clip(ratio, lo, hi) ** strength)
         else:
             factors[part] = 1.0
+            whose = "the reference" if not target[part] else "the model"
+            notes.append(
+                f"{whose} has no {part} material (<name>.body is skin), so the {part} was kept"
+            )
 
     th, tw = texture.shape[:2]
     skin = np.zeros((th, tw), dtype=bool)
@@ -865,25 +890,33 @@ def match_colours(job):
         scale = int(max_size) / max(tw, th)
         image.scale(max(1, round(tw * scale)), max(1, round(th * scale)))
     size = list(image.size)
-    tmp = job["output"] + ".texture.png"
+    tmp = job["output"] + (".texture.jpg" if jpeg else ".texture.png")
     image.filepath_raw = tmp
-    image.file_format = "PNG"
-    image.save()
+    if jpeg:
+        image.file_format = "JPEG"
+        image.save(quality=JPEG_QUALITY)
+    else:
+        image.file_format = "PNG"
+        image.save()
     with open(tmp, "rb") as f:
-        png = f.read()
+        data = f.read()
     os.remove(tmp)
-    replace_texture(job["input"], job["output"], png)
-    return {
+    replace_texture(job["input"], job["output"], data, "image/jpeg" if jpeg else "image/png")
+    report = {
         "skin_factor": round(factors["skin"], 3),
         "clothes_factor": round(factors["clothes"], 3),
         "texture_size": size,
         "skin_brightness": [current["skin"], target["skin"]],
         "clothes_brightness": [current["clothes"], target["clothes"]],
     }
+    if notes:
+        report["note"] = "; ".join(notes)
+    return report
 
 
-def replace_texture(path, output, png):
-    """Copies a GLB with its base colour image(s) replaced by one PNG."""
+def replace_texture(path, output, png, mime="image/png"):
+    """Copies a GLB with its base colour image(s) replaced by one picture
+    (PNG unless ``mime`` says otherwise)."""
     doc, binary = read_glb(path)
     sources = {
         doc["textures"][m["pbrMetallicRoughness"]["baseColorTexture"]["index"]]["source"]
@@ -896,7 +929,7 @@ def replace_texture(path, output, png):
         data = png if i in replaced else view_bytes(doc, binary, i)
         out.add(data, view.get("target"), view.get("byteStride"))
     for i in sources:
-        doc["images"][i]["mimeType"] = "image/png"
+        doc["images"][i]["mimeType"] = mime
     write_glb(doc, out, output)
 
 
@@ -1268,7 +1301,21 @@ def skin_faces(obj, arm):
     got, level = chroma(colours)
     close = np.linalg.norm(got - want, axis=1) < 0.035
     lit = (level > bright * 0.55) & (level < bright * 1.6)
-    skin = raw = close & lit
+    raw = close & lit
+    # On the head, generated textures carry shadow: cheeks, eye sockets and
+    # stubble down to a third of the face's brightness, their hue shifted.
+    # Hair is darker still (about a tenth) and grey or neutral, so there a
+    # warm colour from a quarter of the face's brightness up counts as skin.
+    neck = next(
+        (b for b in arm.data.bones if b.name.lower().replace("mixamorig:", "") == "neck"), head
+    )
+    centres = np.empty(n * 3)
+    obj.data.polygons.foreach_get("center", centres)
+    # The model is in world space (see join_world), like the bones here.
+    above = centres.reshape(n, 3)[:, 2] > (mw @ neck.head_local).z
+    warm = got[:, 0] - got[:, 1] > 0.05
+    shaded = (level > bright * 0.25) & (level < bright * 1.6)
+    skin = raw = raw | (above & warm & shaded & (np.linalg.norm(got - want, axis=1) < 0.1))
     # Smooth out speckles: a face follows the majority of its neighbours.
     edges = {}
     for poly in obj.data.polygons:

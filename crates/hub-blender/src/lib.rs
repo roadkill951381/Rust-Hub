@@ -379,6 +379,7 @@ impl Rigger for Blender {
                 "like": like,
                 "strength": request.strength,
                 "max_size": request.max_size,
+                "jpeg": request.jpeg,
             }),
         )?;
         serde_json::from_value(serde_json::Value::Object(report.rest))
