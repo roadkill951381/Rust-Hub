@@ -5,7 +5,7 @@ use std::path::Path;
 
 use hub_blender::Blender;
 use hub_core::analysis::topology;
-use hub_core::engine::{MeshOp, MeshTools, RigRequest, Rigger};
+use hub_core::engine::{ColourRequest, MeshOp, MeshTools, RigRequest, Rigger};
 use hub_core::primitives;
 use serde_json::Value;
 
@@ -259,5 +259,75 @@ fn dark_skin_under_a_beard_is_still_found() {
     assert!(
         (plain * 0.6..plain * 1.2).contains(&bearded),
         "plain {plain}, bearded {bearded}"
+    );
+}
+
+#[test]
+fn colours_are_brought_to_the_game_characters_levels() {
+    let Some(blender) = blender() else { return };
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rig_fixtures.py");
+    let dir = tempfile::tempdir().unwrap();
+    // Two rigged characters on the same skeleton: a light-skinned one in
+    // near-black clothes, and a dark-skinned one in dark grey.
+    let rigged = |beard: &str| {
+        let sub = dir.path().join(beard);
+        std::fs::create_dir_all(&sub).unwrap();
+        blender
+            .run_script(
+                &fixtures,
+                [
+                    sub.as_os_str(),
+                    "47".as_ref(),
+                    "32".as_ref(),
+                    "face".as_ref(),
+                    beard.as_ref(),
+                ],
+            )
+            .unwrap();
+        let output = sub.join("rigged.glb");
+        blender
+            .rig(&RigRequest {
+                model: sub.join("model.glb"),
+                reference: sub.join("reference.glb"),
+                output: output.clone(),
+                triangles: None,
+                materials: Some("surv_test".into()),
+            })
+            .unwrap();
+        output
+    };
+    let (light, dark) = (rigged("plain"), rigged("beard"));
+    let output = dir.path().join("matched.glb");
+    let report = blender
+        .match_colours(&ColourRequest {
+            model: light.clone(),
+            like: dark,
+            output: output.clone(),
+            strength: 1.0,
+            max_size: Some(128),
+        })
+        .unwrap();
+    // Skin (0.8, 0.6, 0.5) toward (0.35, 0.26, 0.22): about a fifth as
+    // bright in linear light. Clothes (0.12) toward 0.25: lighter, up to
+    // the limit of twice as bright.
+    assert!((0.15..0.3).contains(&report.skin_factor), "{report:?}");
+    assert!((report.clothes_factor - 2.0).abs() < 1e-3, "{report:?}");
+    assert_eq!(report.texture_size, [128, 128]);
+    assert_eq!(
+        skeleton(&glb_json(&light)),
+        skeleton(&glb_json(&output)),
+        "the skeleton is kept"
+    );
+
+    // The face, close up: darker skin, still skin-coloured.
+    let before = dir.path().join("before.png");
+    let after = dir.path().join("after.png");
+    blender.face_view(&light, &before).unwrap();
+    blender.face_view(&output, &after).unwrap();
+    let before = *image::open(&before).unwrap().to_rgb8().get_pixel(470, 560);
+    let after = *image::open(&after).unwrap().to_rgb8().get_pixel(470, 560);
+    assert!(
+        after[0] < before[0] - 60 && after[0] > after[2] + 15,
+        "before {before:?}, after {after:?}"
     );
 }

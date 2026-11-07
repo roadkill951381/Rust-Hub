@@ -326,6 +326,23 @@ pub struct SharpenFaceArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct MatchColoursArgs {
+    /// Absolute path of a rigged, textured character (.glb), e.g. from rig.
+    pub model: PathBuf,
+    /// Absolute path of the game's own character (.glb) whose skin and
+    /// clothes brightness to match, usually the one it was rigged like.
+    pub like: PathBuf,
+    /// Absolute path to write the result (.glb).
+    pub output: PathBuf,
+    /// How far to go, 0 to 1 (1 by default matches the brightness).
+    #[serde(default)]
+    pub strength: Option<f32>,
+    /// Shrink the texture to at most this many pixels a side, e.g. 1024.
+    #[serde(default)]
+    pub max_texture: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SaveAssetArgs {
     pub name: String,
     #[serde(default)]
@@ -756,6 +773,24 @@ impl HubServer {
             prompt: a.prompt,
             repaint: a.repaint,
             seed: a.seed,
+        };
+        self.run_job(command, context).await
+    }
+
+    #[tool(
+        description = "Bring a rigged, textured character (.glb) to a game character's colour levels. Generated textures carry the colours of evenly lit pictures and often look washed out under a game's lights; this darkens or lightens the skin and the clothes (each as a whole, keeping their hues) to the brightness of the same parts of like, usually the game's own character the model was rigged like. Can also shrink the texture (max_texture) to the game's size. Run it after sharpen_face. Writes output and adds it to the scene."
+    )]
+    async fn match_colours(
+        &self,
+        Parameters(a): Parameters<MatchColoursArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let command = Command::MatchColours {
+            model: a.model,
+            like: a.like,
+            output: a.output,
+            strength: a.strength,
+            max_texture: a.max_texture,
         };
         self.run_job(command, context).await
     }
